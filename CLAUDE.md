@@ -86,6 +86,30 @@ Commit decoder / schema / ingest self-improvements with a `harness:`
 prefix. Record notable changes in `memory/improvements.md` as a
 one-liner with the commit hash.
 
+## ABI overlay policy (3-tier)
+
+The vendored `kami_context/abi/*.json` set can drift behind the live chain
+(upstream publishes, we lag). When you find a selector missing from the
+JSON ABI, apply this policy — do not ask each time.
+
+- **Tier A — auto-extend.** If a selector is missing from the vendored
+  JSON ABI *and* its signature is explicitly documented in
+  `kami_context/system-ids.md`, add it to `SYSTEM_ABI_OVERLAY` without
+  asking. Every overlay entry MUST carry a one-line comment citing the
+  source (a `system-ids.md` section, or "deployed bytecode + docs" when
+  both back the signature).
+- **Tier B — flag.** If a selector's signature is inferred only from
+  calldata shape (length, plausible decode), or if it *contradicts* the
+  documented signature, do not add it. Log to
+  `memory/unknown-systems.md` under "## Open" and raise in
+  `memory/questions-for-human.md` with sample tx hashes.
+- **Tier C — never invent.** Never add an overlay entry without either
+  doc backing *or* deployed-bytecode confirmation of the selector.
+
+Overlay entries are additive — never override a vendored JSON signature.
+If a JSON signature is wrong (not just missing), re-vendor
+`kami_context/` via `scripts/vendor-context.sh` instead of overlay-shadowing.
+
 ## Validation discipline
 
 Before trusting a decoded action type:
