@@ -65,18 +65,27 @@ Vendored JSON has only the singular `executeTyped(uint256 id)`. Chain uses
 `executeBatchedAllowFailure(uint256[] ids)` (selector `0xb0fa4458`), both
 documented in system-ids.md. Both added to overlay.
 
-### 3. `system.craft` — UNRESOLVED (flagged to human)
+### 3. `system.craft` — RESOLVED (session 2, 2026-04-17)
 
 Vendored JSON + system-ids.md both declare
-`executeTyped(uint256 assignerID, uint32 index, uint256 amt)`.
-Chain txs use a **2-arg** selector `0x5c817c70`, which hashes to
-`executeTyped(uint32, uint256)`. Decoding the 2 args on real craft txs
-yields small, plausibly (recipe_index, amount)-shaped values (e.g.
-`(34, 2)`, `(29, 1)`), but the field semantics are not documented
-anywhere in kami_context. Flagged in `memory/questions-for-human.md` for
-confirmation before adding to the overlay.
+`executeTyped(uint256 assignerID, uint32 index, uint256 amt)`
+(selector `0xa693008c`). Chain txs use the **2-arg** selector
+`0x5c817c70 = executeTyped(uint32, uint256)`.
 
-Impact at current volume: 6 unknown txs per 500-block sample (~2.3%).
+Confirmed against deployed `CraftSystem` bytecode at
+`0xd5dDd9102900cbF6277e16D3eECa9686F2531951`: contains `0x5c817c70`,
+does **not** contain `0xa693008c`. Vendored `CraftSystem.json` is stale.
+
+Fix: `SYSTEM_ABI_OVERLAY["system.craft"]` adds `executeTyped(uint32 index,
+uint256 amt)`. `SYSTEM_FIELD_MAP["system.craft"]` already mapped
+`index → metadata.recipe_index` and `amt → amount`. Test coverage:
+`tests/test_decoder.py::test_craft_executeTyped_2arg_overlay`.
+
+Note: `_typed_fn` lookup still resolves to the stale 3-arg JSON form for
+craft, which would fail on any hypothetical `execute(bytes)` craft call.
+All craft txs observed so far go through the direct selector path, so
+this is theoretical — revisit if an `execute(bytes)` craft decode error
+shows up in `unknown-systems.md`.
 
 ## Semantic quirks worth knowing
 

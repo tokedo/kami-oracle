@@ -47,6 +47,7 @@ def decoder_and_addrs():
         "system.kami.use.item",
         "system.kami.level",
         "system.skill.upgrade",
+        "system.craft",
     ])
     dec = Decoder(ABI_DIR, reg)
     return dec, reg
@@ -164,6 +165,35 @@ def test_kami_use_item_feed(decoder_and_addrs):
     assert a.action_type == "feed"
     assert a.kami_id == "99"
     assert a.item_index == 11301
+
+
+def test_craft_executeTyped_2arg_overlay(decoder_and_addrs):
+    """Confirmed on-chain selector 0x5c817c70 = executeTyped(uint32,uint256).
+
+    Deployed CraftSystem bytecode contains this selector (2026-04-17 check);
+    vendored CraftSystem.json is stale. Sample (34, 2) → recipe_index=34,
+    amount=2.
+    """
+    dec, reg = decoder_and_addrs
+    addr = _addr_for(reg, "system.craft")
+    calldata = bytes.fromhex(
+        "5c817c70"
+        + "0000000000000000000000000000000000000000000000000000000000000022"  # index=34
+        + "0000000000000000000000000000000000000000000000000000000000000002"  # amt=2
+    )
+    r = dec.decode_tx(
+        tx_hash="0x" + "44" * 32,
+        from_addr="0x0000000000000000000000000000000000000001",
+        to_addr=addr,
+        calldata=calldata,
+        block_number=1, block_timestamp=1, status=1,
+    )
+    assert r.status == "ok", r.reason
+    assert len(r.actions) == 1
+    a = r.actions[0]
+    assert a.action_type == "item_craft"
+    assert a.amount == "2"
+    assert a.metadata["recipe_index"] == "34"
 
 
 def test_unknown_system_address_returns_error(decoder_and_addrs):

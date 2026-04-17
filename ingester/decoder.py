@@ -77,6 +77,18 @@ SYSTEM_ABI_OVERLAY: dict[str, list[tuple[str, list[tuple[str, str]]]]] = {
         ("executeBatchedAllowFailure",    [("ids", "uint256[]")]),
         ("executeAllowFailure",           [("arguments", "bytes")]),
     ],
+    # system.craft: deployed CraftSystem bytecode at
+    # 0xd5dDd9102900cbF6277e16D3eECa9686F2531951 contains selector 0x5c817c70
+    # (executeTyped(uint32,uint256)) and does NOT contain the documented
+    # 3-arg 0xa693008c. Vendored CraftSystem.json is stale — confirmed
+    # off-VM 2026-04-17. Sample decodes (34,2), (29,1), (6,2) match
+    # (recipe_index, amount).
+    "system.craft": [
+        ("executeTyped", [
+            ("index", "uint32"),
+            ("amt",   "uint256"),
+        ]),
+    ],
 }
 
 
