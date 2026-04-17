@@ -27,9 +27,13 @@ TRANSIENT_EXC = (
 
 @dataclass
 class RetryPolicy:
-    max_attempts: int = 5
+    # Tuned for long-running backfills against the public Yominet RPC. A
+    # 4-week backfill can take days and traverses millions of RPC calls;
+    # transient timeouts are inevitable. 8 attempts × exp-backoff capped
+    # at 60s rides out most short outages without exploding wall time.
+    max_attempts: int = 8
     base_delay_s: float = 0.5
-    max_delay_s: float = 30.0
+    max_delay_s: float = 60.0
 
 
 def _retry(fn: Callable[[], T], policy: RetryPolicy, desc: str) -> T:

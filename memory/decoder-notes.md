@@ -157,6 +157,65 @@ overlay.
 - `scripts/validate_decode.py` — dry-run over an arbitrary block window;
   summarizes counts, examples, and appends unknowns to
   `memory/unknown-systems.md`. No writes to the production DuckDB.
-- `tests/test_decoder.py` — 6 unit tests over canned on-chain calldata.
+- `scripts/scan_operator.py` — targeted back-scan filtered to a single
+  `tx.from` wallet. Prints a per-kami activity summary; writes nothing
+  to DuckDB. Used for spot-validating decode against known operators.
+- `tests/test_decoder.py` — 7 unit tests over canned on-chain calldata.
   Covers executeTyped, executeBatched fan-out, overlay signatures, and
   error paths. Runs offline.
+
+## Receipts strategy (session 2, 2026-04-17)
+
+**Decision: keep per-tx `eth_getTransactionReceipt`** in
+`ingester/ingest.py`. `eth_getBlockReceipts` is supported by the
+Yominet RPC (probe latency ~240ms), but Yominet block density is low
+— ~0.5–0.6 matched txs per block in the validated window — so one
+`get_tx_receipt` per matched tx and one `eth_getBlockReceipts` per
+block are equivalent in RPC count, and the block-scoped call is
+*slower* on the common case of 0–1 tx blocks. A head-to-head probe
+on a 1-tx block showed `get_tx_receipt`=255ms vs
+`eth_getBlockReceipts`=750ms; net speedup is negative.
+
+Instead, `RetryPolicy` is bumped (attempts 5→8, max delay 30s→60s) to
+ride out transient outages across the multi-day 4-week backfill. No
+schema or decode change; block-fetch itself (~250ms) remains the real
+bottleneck — addressing it would require concurrent workers, which is
+out of scope for Stage 1.
+
+## Spot-validation: bpeon operator (session 2, 2026-04-17)
+
+Operator wallet: `0x86aDb8f741E945486Ce2B0560D9f643838FAcEC2` (founder's
+bpeon manager). Scanned 2000 blocks ending at 27,782,694
+(~1.2h time span) with `scripts/scan_operator.py`.
+
+| metric               | value |
+|----------------------|-------|
+| matched txs          | 6     |
+| actions produced     | 7     |
+| decode coverage      | 100%  |
+| action_type          | `harvest_stop` × 7 |
+| `executeTyped` txs   | 5 (1 action each) |
+| `executeBatchedAllowFailure` txs | 1 (fan-out to 2 actions) |
+
+Interpretation: the operator is actively running a harvest-stop loop
+(6 txs in 72min). All 6 txs decode cleanly; the fan-out case correctly
+produces 2 separate `kami_action` rows sharing `tx_hash`. No unknown
+selectors, no decode errors, no surprises.
+
+`kami_id`/`node_id` are `NULL` on every row — **expected**. Per
+existing decoder-notes, `harvest_stop` takes the harvest *instance* ID
+(stored in `metadata.harvest_id`), not the kami. Recovering `kami_id`
+requires joining against the prior `harvest_start` row where the
+instance was created — a Phase B/derived-metrics task, not Stage 1.
+
+What this validation does NOT confirm (documented for future sessions):
+
+- The CLAUDE.md note that bpeons harvest node 47 cannot be checked
+  from stop txs alone (no `node_id` in calldata). A longer back-scan
+  reaching the original `harvest_start` txs would close this gap.
+- 1.2h is too short to see a full harvest cycle. No `harvest_collect`
+  txs landed in the window; the operator likely collects less
+  frequently. Widen to 20k+ blocks in a future scan if needed.
+
+Conclusion: decode quality against this known-good operator is clean.
+Safe to proceed to 4-week backfill.
