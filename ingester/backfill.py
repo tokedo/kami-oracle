@@ -1,0 +1,106 @@
+"""One-shot backfill going backward from head.
+
+Walks backward from a head block for ``--weeks * (blocks/week)`` blocks (or an
+explicit block count) and processes each range like the poller. Intended for
+initial population; do not run in parallel with the poller on the same DB.
+
+Usage:
+    python -m ingester.backfill --weeks 4
+    python -m ingester.backfill --from-block 27700000 --to-block 27778000
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+from pathlib import Path
+
+from .chain_client import ChainClient
+from .config import configure_logging, load_config
+from .decoder import Decoder
+from .ingest import process_block_range
+from .storage import Storage, read_schema_sql
+from .system_registry import resolve_systems
+
+log = logging.getLogger(__name__)
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+UNKNOWN_LOG = REPO_ROOT / "memory" / "unknown-systems.md"
+
+# Yominet blocktime is ~1–2s. At 1.5s average: 604800 / 1.5 = ~403200 blocks/wk.
+# We err on the generous side to guarantee full coverage; the poller will
+# dedupe via ON CONFLICT DO NOTHING and the cursor.
+BLOCKS_PER_WEEK = 400_000
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--weeks", type=int, default=None,
+                    help="Walk this many weeks back from head (mutually exclusive with --from-block).")
+    ap.add_argument("--from-block", type=int, default=None,
+                    help="Explicit start block (inclusive).")
+    ap.add_argument("--to-block", type=int, default=None,
+                    help="Explicit end block (inclusive, default: head).")
+    ap.add_argument("--chunk-size", type=int, default=500,
+                    help="Blocks per batch (default 500).")
+    ap.add_argument("--dry-run", action="store_true", help="Do not write to DB.")
+    args = ap.parse_args()
+
+    if args.weeks is None and args.from_block is None:
+        ap.error("supply --weeks or --from-block")
+
+    cfg = load_config()
+    configure_logging(cfg.log_level)
+
+    client = ChainClient(cfg.rpc_url)
+    if not client.is_connected():
+        log.error("backfill: RPC %s not reachable", cfg.rpc_url)
+        return 1
+
+    head = args.to_block if args.to_block is not None else client.block_number()
+    if args.from_block is not None:
+        start = args.from_block
+    else:
+        start = max(1, head - args.weeks * BLOCKS_PER_WEEK)
+
+    log.info("backfill: head=%d start=%d (%d blocks)", head, start, head - start + 1)
+
+    storage = None if args.dry_run else Storage(cfg.db_path)
+    if storage is not None:
+        storage.bootstrap(read_schema_sql(REPO_ROOT))
+
+    registry = resolve_systems(client, cfg.world_address, cfg.abi_dir)
+    decoder = Decoder(cfg.abi_dir, registry)
+    vendor_sha = cfg.vendor_sha_path.read_text().strip() if cfg.vendor_sha_path.exists() else None
+
+    total_blocks = 0
+    total_actions = 0
+    cur = start
+    while cur <= head:
+        chunk_end = min(head, cur + args.chunk_size - 1)
+        stats = process_block_range(
+            client=client,
+            decoder=decoder,
+            registry=registry,
+            storage=storage,
+            start_block=cur,
+            end_block=chunk_end,
+            vendor_sha=vendor_sha,
+            unknown_log_path=UNKNOWN_LOG,
+        )
+        total_blocks += stats.blocks_scanned
+        total_actions += stats.actions
+        log.info(
+            "backfill: %d..%d done (actions=%d, running total=%d)",
+            cur, chunk_end, stats.actions, total_actions,
+        )
+        cur = chunk_end + 1
+
+    log.info("backfill: complete — %d blocks, %d actions", total_blocks, total_actions)
+    if storage is not None:
+        storage.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
