@@ -1,0 +1,171 @@
+# CLAUDE.md — Operating Instructions for kami-oracle
+
+> This file is read automatically by Claude Code at the start of every
+> session. It tells you, the autonomous agent maintaining this repo,
+> how to operate.
+
+## What kami-oracle is
+
+kami-oracle observes every on-chain action taken by every kami on
+Yominet over a rolling 4-week window, decodes them against the
+Kamigotchi System ABIs, and stores them in a DuckDB database for
+downstream analysis.
+
+Purpose: surface **collective behavior** so agents don't have to
+re-derive strategy from first principles. Top players have already
+encoded months of optimization in their on-chain tx history — this
+service makes that queryable.
+
+## Current phase: Stage 1 (Phase A of ADR-004) — Ingest & store
+
+**In scope:**
+- Continuous tail of Yominet, tx-level decoding against vendored ABIs.
+- DuckDB file maintained at `db/kami-oracle.duckdb`.
+- Four tables: `raw_tx`, `kami_action`, `kami_static`, `ingest_cursor`.
+- Rolling 4-week window, older rows pruned on a schedule.
+- Idempotent: restart-safe, no duplicates.
+- Validated against the founder's own accounts (caw, buzz, bpeon).
+
+**Out of scope for Stage 1 — do NOT build any of these yet:**
+- MCP server or any external query endpoint.
+- Archetype classification.
+- Derived metrics tables / rollups.
+- ML / clustering / prediction.
+- Any speculative query tools "for future agents."
+- Any code that writes an on-chain tx. This is read-only.
+
+## How to orient yourself at the start of a session
+
+1. Read this file fully.
+2. Read `README.md`.
+3. Check `memory/next-steps.md` for what this session should pick up.
+4. Check `memory/improvements.md` and `memory/decoder-notes.md` for
+   what past sessions learned.
+5. Check `memory/questions-for-human.md` — if it's non-empty, STOP
+   and wait for human input rather than guessing.
+6. Skim `kami_context/system-ids.md` + `kami_context/chain.md` if
+   you're touching decoding logic.
+
+## Schema
+
+Canonical definitions live in `schema/schema.sql`. Summary:
+
+- **`raw_tx`**: one row per tx that touches the Kamigotchi World
+  contract. Includes `tx_hash` (PK), `block_number`, `timestamp`,
+  `from_addr`, `to_addr`, `method_sig`, `raw_calldata`, `status`,
+  `gas_used`, `gas_price_wei`.
+- **`kami_action`**: decoded, one row per logical game action.
+  Includes `id` (PK), `tx_hash` (FK), `kami_id`, `action_type`
+  (enum), `timestamp`, `node_id`, `target_kami_id`, `amount`,
+  `metadata_json`. `action_type` initial enum: `harvest_start`,
+  `harvest_stop`, `harvest_collect`, `harvest_liquidate`, `feed`,
+  `rest_start`, `rest_stop`, `move`, `lvlup`, `skill_upgrade`,
+  `skill_respec`, `equip`, `unequip`, `revive`, `die`, `quest_accept`,
+  `quest_complete`, `quest_drop`, `trade_create`, `trade_execute`,
+  `trade_complete`, `trade_cancel`, `item_use`, `item_craft`.
+- **`kami_static`**: per-kami traits. `kami_id` (PK), `owner_address`,
+  `body`, `hand`, `face`, `background`, base stats, `first_seen_ts`,
+  `last_refreshed_ts`.
+- **`ingest_cursor`**: ops state. Last committed block, vendor
+  version, schema version.
+
+Extend the `action_type` enum as you discover new system calls. Never
+silently drop an unknown tx — log it to `memory/unknown-systems.md`
+for human review.
+
+## Harness-as-raw-clay
+
+The oracle evolves its own code. When you find:
+- A decode bug → fix it in place.
+- A missing `action_type` → add to the enum + decoder.
+- A schema gap → add a migration in `migrations/` and bump the
+  schema version.
+- An ingest inefficiency → fix it.
+
+Commit decoder / schema / ingest self-improvements with a `harness:`
+prefix. Record notable changes in `memory/improvements.md` as a
+one-liner with the commit hash.
+
+## Validation discipline
+
+Before trusting a decoded action type:
+1. Show 2–3 example tx hashes + the decoded row.
+2. Check against a known account's activity. The founder's bpeon
+   accounts on kami-zero are safe reference — they harvest node 47
+   under Kamibots `auto_v2`, so we expect many `harvest_start` /
+   `harvest_collect` / `harvest_stop` actions.
+3. If decode yields a surprising result (one kami with 10k txs in an
+   hour, negative musu amounts, tx counts that don't match chain
+   reality), STOP and investigate before committing. Record findings
+   in `memory/decoder-notes.md`.
+
+## Guardrails — never do
+
+- **Never sign or send an on-chain tx.** This is a read-only service.
+- **Never commit secrets** (RPC API keys, private keys, tokens) to
+  git. Everything via `.env` (gitignored). Only `env.template` is
+  tracked.
+- **Never add user tracking / telemetry / phone-home.** This is an
+  open-source public-good service.
+- **Never expose an external endpoint** (MCP, HTTP, anything that
+  binds a public port). Stage 1 is local-only. The hosted-endpoint
+  decision happens in Phase D with a human-authored ADR.
+- **Never extend the 4-week window** without human approval in
+  `memory/next-steps.md`.
+- **Never guess at an ABI.** If a system selector has no matching
+  ABI, log it to `memory/unknown-systems.md` and skip the tx — don't
+  mis-decode.
+- **Never trust `git push --force`** or destructive git operations
+  without explicit human instruction.
+
+## Tech stack
+
+- **Language**: Python 3.11+.
+- **Chain**: web3.py, reading public Yominet RPC.
+- **DB**: DuckDB, file-backed at `db/kami-oracle.duckdb`.
+- **Testing**: pytest.
+- **Config**: `.env` (gitignored). `env.template` tracked.
+- **Dependency management**: pip + `requirements.txt`.
+
+## Repo layout
+
+- `ingester/` — chain tail, decoder, upsert, backfill, prune.
+- `schema/schema.sql` — DuckDB schema (canonical).
+- `migrations/` — schema migration scripts.
+- `kami_context/` — vendored from kamigotchi-context (ABIs + system
+  IDs + chain doc). Re-vendored via `scripts/vendor-context.sh`.
+- `scripts/` — ops scripts (vendor-context, backfill, prune, etc.).
+- `db/` — DuckDB file (gitignored).
+- `memory/` — your self-improvement log + plan-for-next-session.
+- `tests/` — pytest.
+
+## Session protocol
+
+1. Read CLAUDE.md, `memory/next-steps.md`, `memory/improvements.md`,
+   `memory/questions-for-human.md`.
+2. If `questions-for-human.md` is non-empty, STOP. Do not proceed
+   until a human has addressed it.
+3. Run `git status` / `git log -5` to orient on recent state.
+4. Do the work in the next-steps plan. Commit early and often.
+5. At end of session: update `memory/next-steps.md` with a clear
+   plan for the following session. Update `memory/improvements.md`
+   if anything notable was learned. Push to origin.
+
+## Open-source posture
+
+This repo is MIT licensed. Anyone can clone, run, and modify their
+own oracle instance. Treat every file you write as code strangers
+may read.
+
+The specific VM running this service (the one you're in) is not a
+public endpoint. No MCP server, no HTTP API, no exposed ports — yet.
+That decision happens in Phase D.
+
+## Commits & push
+
+- `harness:` prefix for decode / ingest / schema self-improvement.
+- Plain prefixes (`feat:`, `fix:`, `docs:`, `chore:`) for everything
+  else.
+- Commit early and often. Push to origin after each meaningful chunk.
+- Never skip hooks, never force-push, never amend a pushed commit
+  unless the human asks.

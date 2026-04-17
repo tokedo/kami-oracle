@@ -1,0 +1,31 @@
+# Secrets & local config
+.env
+.env.*
+!env.template
+
+# DuckDB file + WAL
+db/
+*.duckdb
+*.duckdb.wal
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Logs
+*.log
+logs/
+
+# Local agent state (if kami-oracle self-runs with claude-code, like kami-zero)
+.claude/settings.local.json
