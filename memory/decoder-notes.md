@@ -121,6 +121,37 @@ None of these were seen on the current chain in the sample window — so
 their absence doesn't hurt Stage-1 coverage today. But re-vendoring
 `kami_context` after upstream publishes them would close the gap.
 
+## Session 2 re-validation (2026-04-17, blocks 27,778,645 .. 27,780,644)
+
+After the craft overlay landed (`harness: add craft executeTyped...`):
+
+| metric              | count | note |
+|---------------------|-------|------|
+| txs seen            | 1123  | all txs in the window |
+| matched to system   | 1116  | 99.4% — non-match is cross-module noise |
+| successfully decoded| 1116  | **100% coverage** of matched txs |
+| unknown selector    | 0     | craft resolved |
+| decode errors       | 0     | — |
+| actions produced    | 2057  | batched fan-out still dominant |
+
+Action-type breakdown:
+
+- `harvest_start` — 949 (~46%)
+- `harvest_stop`  — 761 (~37%)
+- `feed`          — 187 (~9%)
+- `item_craft`    — 47  (newly decoded this session)
+- `skill_upgrade` — 40
+- `lvlup`         — 38
+- `harvest_collect` — 17
+- `move`          — 15
+- `droptable_reveal` — 2
+- `scavenge_claim` — 1
+
+Spot-check of the craft fan-out: 3 sample rows all have
+`metadata.fn == "executeTyped"`, `recipe_index ∈ {6, 23, 29}`,
+`amount ∈ {1, 2, 5}` — shape matches the hypothesis that confirmed the
+overlay.
+
 ## Validation scripts
 
 - `scripts/validate_decode.py` — dry-run over an arbitrary block window;
