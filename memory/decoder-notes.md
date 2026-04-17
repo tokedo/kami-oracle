@@ -182,6 +182,35 @@ schema or decode change; block-fetch itself (~250ms) remains the real
 bottleneck — addressing it would require concurrent workers, which is
 out of scope for Stage 1.
 
+## RPC retention limit (session 2, 2026-04-17)
+
+The public Yominet RPC at
+`https://jsonrpc-yominet-1.anvil.asia-southeast.initia.xyz` retains
+**only ~22.7 days (3.24 weeks)** of block history, measured by
+binary-searching which historical `eth_getBlockByNumber` requests return
+"block not found." At 2026-04-17 21:12 UTC, head=27,783,030 and the
+earliest retained block was 26,769,364 — 1,013,670 blocks deep.
+
+Implications:
+
+- A full 4-week (28-day) backfill as prescribed by CLAUDE.md is
+  **not achievable** against this endpoint. The backfill can cover at
+  most ~22 days.
+- The retention edge is **fuzzy**: requests for blocks a few thousand
+  blocks past the probed earliest value still hit intermittent "not
+  found" errors, consistent with a load-balanced RPC whose backends
+  have slightly different retention depths. `backfill.py` now probes
+  the earliest retained block at startup and clamps `start_block` to
+  `earliest + RETENTION_BUFFER_BLOCKS` (default 20,000).
+- Transient retries on edge-of-retention blocks resolve on their own
+  (the load balancer routes a retry to a backend that still has the
+  block), so the backfill still succeeds — just slower near the start.
+
+Long-term options for a full 4-week window (owner decision, not
+automated): (a) set up a private archive-node RPC, (b) accept a ~22-day
+rolling window in practice, (c) let the oracle accumulate history
+locally over time (the poller tails forward indefinitely).
+
 ## Spot-validation: bpeon operator (session 2, 2026-04-17)
 
 Operator wallet: `0x86aDb8f741E945486Ce2B0560D9f643838FAcEC2` (founder's

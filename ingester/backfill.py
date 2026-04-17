@@ -15,6 +15,8 @@ import argparse
 import logging
 from pathlib import Path
 
+from web3.exceptions import Web3Exception
+
 from .chain_client import ChainClient
 from .config import configure_logging, load_config
 from .decoder import Decoder
@@ -31,6 +33,45 @@ UNKNOWN_LOG = REPO_ROOT / "memory" / "unknown-systems.md"
 # We err on the generous side to guarantee full coverage; the poller will
 # dedupe via ON CONFLICT DO NOTHING and the cursor.
 BLOCKS_PER_WEEK = 400_000
+
+# Safety buffer when probing earliest retained block. The public Yominet RPC
+# appears load-balanced across multiple backends with slightly different
+# retention depths; requests near the pruning edge hit "block not found"
+# retries even a few thousand blocks past the probed-earliest value. 20k
+# blocks ≈ 8h of real time — a few hours of history lost, several hours of
+# retry time saved during backfill.
+RETENTION_BUFFER_BLOCKS = 20_000
+
+
+def earliest_retained_block(client: ChainClient, head: int, floor: int) -> int:
+    """Binary-search the lowest block the RPC will serve in [floor, head].
+
+    Public Yominet RPC prunes blocks older than ~3.2 weeks (session 2,
+    2026-04-17). Probing up-front lets us clamp the backfill start instead
+    of burning through retries on every doomed historical fetch.
+
+    Returns the earliest block present on the RPC. If all probed blocks
+    exist, returns ``floor``.
+    """
+    def exists(n: int) -> bool:
+        try:
+            client.w3.eth.get_block(n, full_transactions=False)
+            return True
+        except Web3Exception as e:
+            if "not found" in str(e).lower():
+                return False
+            raise
+
+    if exists(floor):
+        return floor
+    lo, hi = floor, head
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if exists(mid):
+            hi = mid
+        else:
+            lo = mid
+    return hi
 
 
 def main() -> int:
@@ -62,6 +103,20 @@ def main() -> int:
         start = args.from_block
     else:
         start = max(1, head - args.weeks * BLOCKS_PER_WEEK)
+
+    # Probe the RPC's retention depth and clamp start upward if requested
+    # history is beyond the pruning boundary. Skip when caller set an
+    # explicit --from-block (they've presumably done their own math).
+    if args.from_block is None:
+        earliest = earliest_retained_block(client, head, start)
+        if earliest > start:
+            clamped = earliest + RETENTION_BUFFER_BLOCKS
+            log.warning(
+                "backfill: RPC retains from block %d; requested start %d is pruned. "
+                "Clamping to %d (%d-block safety buffer). Full window unreachable on this endpoint.",
+                earliest, start, clamped, RETENTION_BUFFER_BLOCKS,
+            )
+            start = clamped
 
     log.info("backfill: head=%d start=%d (%d blocks)", head, start, head - start + 1)
 
