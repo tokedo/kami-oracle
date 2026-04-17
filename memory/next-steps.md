@@ -33,15 +33,23 @@ over months of poller uptime. Full discussion in
 
 ### Do in this order
 
-1. **Check backfill health.**
+1. **Check backfill health (no DB queries while writer is live).**
    ```
    screen -ls                            # confirm kami-backfill alive
-   tail -200 logs/backfill.log           # recent chunk messages
-   .venv/bin/python -c "import duckdb; c=duckdb.connect('db/kami-oracle.duckdb', read_only=True); print(c.execute('SELECT last_block_scanned, last_block_timestamp FROM ingest_cursor').fetchone()); print('raw_tx:', c.execute('SELECT COUNT(*) FROM raw_tx').fetchone()); print('actions:', c.execute('SELECT COUNT(*) FROM kami_action').fetchone())"
+   tail -200 logs/backfill.log           # recent chunk messages + errors
+   grep -c "done (actions" logs/backfill.log   # chunk count
    ```
-   If it died mid-run, resume with
-   `python -m ingester.backfill --from-block <cursor+1> --to-block <original_head>`.
-   If cursor is near head, backfill is close to done.
+   **Do not open the DuckDB file** while the backfill is running — DuckDB
+   holds an exclusive file lock and even `read_only=True` connections
+   error out with `IOException: Conflicting lock is held`. Infer progress
+   from the backfill log instead (each 500-block chunk logs
+   `backfill: START..END done (actions=N, running total=N)`). If the log
+   has been silent for >10min and the process is still alive, it's
+   stuck in retries on a pruned-block tail — reattach with
+   `screen -r kami-backfill` and observe.
+
+   If it died mid-run, the log's last `done` line tells you the resume
+   point: `python -m ingester.backfill --from-block <last_end+1> --to-block <original_head>`.
 
 2. **If backfill is complete (cursor reached head-at-launch):**
    - Capture summary: row counts, action-type distribution, unique
@@ -61,19 +69,24 @@ over months of poller uptime. Full discussion in
    - Do one or more of the read-only tasks below; return to the
      backfill-health check at start of next session.
 
-### Read-only analytics tasks (safe while backfill runs)
+### Read-only tasks (safe while backfill runs — no DB reads)
 
-`duckdb.connect(..., read_only=True)` is safe to run concurrently with
-the writer process. Useful sanity checks:
+DuckDB file-mode takes an exclusive lock, so you **cannot query the
+live DB** while the backfill writer is running. Work that does not
+touch `db/kami-oracle.duckdb`:
 
-- Action-type distribution over last 24h of backfilled data.
-- Top-20 operator wallets by action count.
-- Harvest-cycle stitching: join `harvest_start` → `harvest_stop` /
-  `harvest_collect` on `metadata.harvest_id` to recover the missing
-  `kami_id` on stop/collect rows (prototype for the Phase B enrichment
-  step).
-- Any new unknown selectors in `memory/unknown-systems.md`? Apply
-  Tier-A/B/C per CLAUDE.md overlay policy.
+- Review `memory/unknown-systems.md` — anything new surfaced by the
+  backfill's incremental runs? Apply Tier-A/B/C per the CLAUDE.md
+  overlay policy. (The backfill appends to this file as it goes.)
+- Scan forward with `scripts/validate_decode.py` on a fresh range near
+  head — it's dry-run by default and doesn't touch the DB. Useful for
+  catching any new action types before they land in production data.
+- Inspect `logs/backfill.log` for recurring RPC failure patterns;
+  consider widening `RetryPolicy` further if so.
+- Draft the Phase B enrichment query for harvest-cycle stitching
+  (`harvest_start → harvest_stop / harvest_collect` on
+  `metadata.harvest_id`) against a scratch DB so it's ready to run the
+  moment the backfill finishes.
 
 ### Deferred (not Session 3 unless human asks)
 

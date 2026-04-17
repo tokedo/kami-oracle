@@ -31,13 +31,11 @@ screen -ls                      # list sessions
 tail -f ~/kami-oracle/logs/backfill.log
 ```
 
-Or query the cursor directly:
-
-```python
-import duckdb
-c = duckdb.connect('db/kami-oracle.duckdb', read_only=True)
-print(c.execute("SELECT last_block_scanned, last_block_timestamp FROM ingest_cursor").fetchone())
-```
+Do **not** open the DuckDB file while the writer is running: DuckDB
+holds an exclusive file lock even against `read_only=True` connections
+(tested 2026-04-17 — raises `IOException: Conflicting lock is held`).
+Read progress from the backfill log, not the DB. Each chunk emits
+`backfill: START..END done (actions=N, running total=N)`.
 
 **If it dies mid-run**, resume is safe. The cursor advances monotonically;
 `--from-block <cursor+1> --to-block <original_head>` continues exactly
