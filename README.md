@@ -13,8 +13,8 @@ Every action every kami takes — harvest start/stop, feed, rest, move,
 level-up, skill allocation, equip, liquidate, quest, trade, item
 craft — is permanently recorded on Yominet. kami-oracle continuously
 tails the chain, decodes these txs against the Kamigotchi System
-ABIs, and maintains a rolling 4-week window of all kami activity in a
-local DuckDB database.
+ABIs, and maintains a rolling window (Stage 1: 1 week, may extend to
+28 days later) of all kami activity in a local DuckDB database.
 
 Downstream phases will unlock questions like:
 
@@ -33,7 +33,7 @@ Yominet RPC (public)
 ingester/   (continuous tail, tx-level decode, idempotent upsert)
     │
     ▼
-db/kami-oracle.duckdb   (rolling 4 weeks)
+db/kami-oracle.duckdb   (rolling 1 week, Stage 1)
     │
     ▼
 (future, Phase D) MCP server  →  playing agents
@@ -50,8 +50,9 @@ db/kami-oracle.duckdb   (rolling 4 weeks)
 - **Open source, no moat.** The repo is MIT. The data it reads is
   public. Anyone can run their own instance.
 - **Read-only.** Oracle cannot influence the game.
-- **Rolling window, not full history.** 4 weeks keeps the DB bounded
-  and signal fresh to the current meta.
+- **Rolling window, not full history.** Stage 1 runs at 1 week (while
+  we clean up what's being collected; may extend to 28 days later).
+  Bounded DB, signal fresh to the current meta.
 
 ## Running your own instance
 
@@ -61,7 +62,7 @@ cd kami-oracle
 cp env.template .env      # set YOMINET_RPC_URL
 pip install -r requirements.txt
 bash scripts/vendor-context.sh ../kamigotchi-context    # vendors ABIs
-python -m ingester.backfill --weeks 4                    # one-shot backfill
+python -m ingester.backfill --days 7                     # one-shot backfill
 python -m ingester.poller                                # continuous tail
 ```
 

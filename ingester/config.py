@@ -52,7 +52,7 @@ def load_config() -> Config:
     return Config(
         rpc_url=rpc_url,
         db_path=db_path,
-        window_days=int(os.environ.get("KAMI_ORACLE_WINDOW_DAYS", "28")),
+        window_days=int(os.environ.get("KAMI_ORACLE_WINDOW_DAYS", "7")),
         poll_interval_s=float(os.environ.get("KAMI_ORACLE_POLL_INTERVAL_S", "3")),
         log_level=os.environ.get("KAMI_ORACLE_LOG_LEVEL", "INFO").upper(),
     )

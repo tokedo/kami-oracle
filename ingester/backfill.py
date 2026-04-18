@@ -1,11 +1,13 @@
 """One-shot backfill going backward from head.
 
-Walks backward from a head block for ``--weeks * (blocks/week)`` blocks (or an
-explicit block count) and processes each range like the poller. Intended for
-initial population; do not run in parallel with the poller on the same DB.
+Walks backward from a head block for ``--days`` (or ``--weeks``) worth of
+blocks, or an explicit block range, and processes each chunk like the
+poller. Intended for initial population; do not run in parallel with the
+poller on the same DB.
 
 Usage:
-    python -m ingester.backfill --weeks 4
+    python -m ingester.backfill --days 7
+    python -m ingester.backfill --weeks 1
     python -m ingester.backfill --from-block 27700000 --to-block 27778000
 """
 
@@ -30,10 +32,11 @@ log = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parent.parent
 UNKNOWN_LOG = REPO_ROOT / "memory" / "unknown-systems.md"
 
-# Yominet blocktime is ~1–2s. At 1.5s average: 604800 / 1.5 = ~403200 blocks/wk.
+# Yominet blocktime is ~1–2s. At 1.5s average: 86400 / 1.5 = ~57600 blocks/day.
 # We err on the generous side to guarantee full coverage; the poller will
 # dedupe via ON CONFLICT DO NOTHING and the cursor.
-BLOCKS_PER_WEEK = 400_000
+BLOCKS_PER_DAY = 60_000
+BLOCKS_PER_WEEK = 7 * BLOCKS_PER_DAY
 
 # Safety buffer when probing earliest retained block. The public Yominet RPC
 # appears load-balanced across multiple backends with slightly different
@@ -77,8 +80,10 @@ def earliest_retained_block(client: ChainClient, head: int, floor: int) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--days", type=int, default=None,
+                    help="Walk this many days back from head (preferred over --weeks).")
     ap.add_argument("--weeks", type=int, default=None,
-                    help="Walk this many weeks back from head (mutually exclusive with --from-block).")
+                    help="Walk this many weeks back from head.")
     ap.add_argument("--from-block", type=int, default=None,
                     help="Explicit start block (inclusive).")
     ap.add_argument("--to-block", type=int, default=None,
@@ -88,8 +93,10 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="Do not write to DB.")
     args = ap.parse_args()
 
-    if args.weeks is None and args.from_block is None:
-        ap.error("supply --weeks or --from-block")
+    if args.days is None and args.weeks is None and args.from_block is None:
+        ap.error("supply --days, --weeks, or --from-block")
+    if args.days is not None and args.weeks is not None:
+        ap.error("--days and --weeks are mutually exclusive")
 
     cfg = load_config()
     configure_logging(cfg.log_level)
@@ -102,6 +109,8 @@ def main() -> int:
     head = args.to_block if args.to_block is not None else client.block_number()
     if args.from_block is not None:
         start = args.from_block
+    elif args.days is not None:
+        start = max(1, head - args.days * BLOCKS_PER_DAY)
     else:
         start = max(1, head - args.weeks * BLOCKS_PER_WEEK)
 

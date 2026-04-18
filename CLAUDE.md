@@ -7,9 +7,9 @@
 ## What kami-oracle is
 
 kami-oracle observes every on-chain action taken by every kami on
-Yominet over a rolling 4-week window, decodes them against the
-Kamigotchi System ABIs, and stores them in a DuckDB database for
-downstream analysis.
+Yominet over a rolling window (Stage 1: 1 week, may extend to 28 days
+later), decodes them against the Kamigotchi System ABIs, and stores
+them in a DuckDB database for downstream analysis.
 
 Purpose: surface **collective behavior** so agents don't have to
 re-derive strategy from first principles. Top players have already
@@ -22,7 +22,10 @@ service makes that queryable.
 - Continuous tail of Yominet, tx-level decoding against vendored ABIs.
 - DuckDB file maintained at `db/kami-oracle.duckdb`.
 - Four tables: `raw_tx`, `kami_action`, `kami_static`, `ingest_cursor`.
-- Rolling 4-week window, older rows pruned on a schedule.
+- Rolling 1-week window (Stage 1 investigation phase; retention-edge
+  avoidance and clean sample before we commit to filtering decisions —
+  see `memory/decoder-notes.md`), older rows pruned on a schedule.
+  Window may extend to 28 days later.
 - Idempotent: restart-safe, no duplicates.
 - Validated against the founder's own accounts (caw, buzz, bpeon).
 
@@ -134,8 +137,8 @@ Before trusting a decoded action type:
 - **Never expose an external endpoint** (MCP, HTTP, anything that
   binds a public port). Stage 1 is local-only. The hosted-endpoint
   decision happens in Phase D with a human-authored ADR.
-- **Never extend the 4-week window** without human approval in
-  `memory/next-steps.md`.
+- **Never extend the rolling window** (currently 1 week; cap 28 days)
+  without human approval in `memory/next-steps.md`.
 - **Never guess at an ABI.** If a system selector has no matching
   ABI, log it to `memory/unknown-systems.md` and skip the tx — don't
   mis-decode.
