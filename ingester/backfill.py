@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import time
 from pathlib import Path
 
 from web3.exceptions import Web3Exception
@@ -131,25 +132,50 @@ def main() -> int:
     total_blocks = 0
     total_actions = 0
     cur = start
+    # Outer survival loop: any unhandled exception escaping the chunk loop
+    # (e.g. a transport fault the retry wrapper couldn't absorb, or a
+    # programming bug tripped by surprise data) kills the inner loop. We
+    # log, sleep, refresh the cursor from DB, and resume. Without this the
+    # 4-week session-2 backfill died after ~6h on a bare
+    # requests.ConnectionError; running backfills shouldn't need a human
+    # minder.
     while cur <= head:
-        chunk_end = min(head, cur + args.chunk_size - 1)
-        stats = process_block_range(
-            client=client,
-            decoder=decoder,
-            registry=registry,
-            storage=storage,
-            start_block=cur,
-            end_block=chunk_end,
-            vendor_sha=vendor_sha,
-            unknown_log_path=UNKNOWN_LOG,
-        )
-        total_blocks += stats.blocks_scanned
-        total_actions += stats.actions
-        log.info(
-            "backfill: %d..%d done (actions=%d, running total=%d)",
-            cur, chunk_end, stats.actions, total_actions,
-        )
-        cur = chunk_end + 1
+        try:
+            while cur <= head:
+                chunk_end = min(head, cur + args.chunk_size - 1)
+                stats = process_block_range(
+                    client=client,
+                    decoder=decoder,
+                    registry=registry,
+                    storage=storage,
+                    start_block=cur,
+                    end_block=chunk_end,
+                    vendor_sha=vendor_sha,
+                    unknown_log_path=UNKNOWN_LOG,
+                )
+                total_blocks += stats.blocks_scanned
+                total_actions += stats.actions
+                log.info(
+                    "backfill: %d..%d done (actions=%d, running total=%d)",
+                    cur, chunk_end, stats.actions, total_actions,
+                )
+                cur = chunk_end + 1
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.exception(
+                "backfill: unhandled exception at cur=%d, sleeping 60s before resume: %s",
+                cur, e,
+            )
+            time.sleep(60)
+            # process_block_range commits the cursor chunk-by-chunk, so the
+            # DB may already be past `cur` if the failure was mid-chunk
+            # post-commit. Trust the DB over our in-memory value.
+            if storage is not None:
+                db_cur = storage.get_cursor()
+                if db_cur is not None and db_cur + 1 > cur:
+                    log.info("backfill: advancing local cur %d -> %d from DB cursor", cur, db_cur + 1)
+                    cur = db_cur + 1
 
     log.info("backfill: complete — %d blocks, %d actions", total_blocks, total_actions)
     if storage is not None:

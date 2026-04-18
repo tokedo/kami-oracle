@@ -72,46 +72,64 @@ def main() -> int:
         next_block = client.block_number()
         log.info("poller: fresh start — beginning at head block %d", next_block)
 
+    # The body has two inner try/excepts (block_number + process_block_range)
+    # for tight retry on the common transport-fault case. The outer
+    # try/except is a belt-and-braces survival net for anything unexpected —
+    # a programming bug, an import-time surprise, anything not on the happy
+    # path. Mirrors the backfill's outer loop; keeps a long-running poller
+    # alive across nightly RPC blips without needing a human minder.
     while not STOP:
         try:
-            head = client.block_number()
-        except Exception as e:  # noqa: BLE001
-            log.warning("poller: block_number failed: %s", e)
-            time.sleep(cfg.poll_interval_s)
-            continue
+            try:
+                head = client.block_number()
+            except Exception as e:  # noqa: BLE001
+                log.warning("poller: block_number failed: %s", e)
+                time.sleep(cfg.poll_interval_s)
+                continue
 
-        if next_block > head:
+            if next_block > head:
+                if args.once:
+                    break
+                time.sleep(cfg.poll_interval_s)
+                continue
+
+            end = min(head, next_block + args.max_catchup - 1)
+            log.info("poller: scanning blocks %d..%d (head=%d)", next_block, end, head)
+            try:
+                stats = process_block_range(
+                    client=client,
+                    decoder=decoder,
+                    registry=registry,
+                    storage=storage,
+                    start_block=next_block,
+                    end_block=end,
+                    vendor_sha=vendor_sha,
+                    unknown_log_path=UNKNOWN_LOG,
+                )
+                log.info(
+                    "poller: blocks=%d txs_seen=%d matched=%d decoded=%d actions=%d unknown=%d errors=%d",
+                    stats.blocks_scanned, stats.txs_seen, stats.txs_matched,
+                    stats.txs_decoded, stats.actions, stats.unknown_selector, stats.decode_errors,
+                )
+                next_block = end + 1
+            except Exception as e:  # noqa: BLE001
+                log.exception("poller: range %d..%d failed, will retry: %s", next_block, end, e)
+                time.sleep(cfg.poll_interval_s)
+                continue
+
             if args.once:
                 break
-            time.sleep(cfg.poll_interval_s)
-            continue
-
-        end = min(head, next_block + args.max_catchup - 1)
-        log.info("poller: scanning blocks %d..%d (head=%d)", next_block, end, head)
-        try:
-            stats = process_block_range(
-                client=client,
-                decoder=decoder,
-                registry=registry,
-                storage=storage,
-                start_block=next_block,
-                end_block=end,
-                vendor_sha=vendor_sha,
-                unknown_log_path=UNKNOWN_LOG,
-            )
-            log.info(
-                "poller: blocks=%d txs_seen=%d matched=%d decoded=%d actions=%d unknown=%d errors=%d",
-                stats.blocks_scanned, stats.txs_seen, stats.txs_matched,
-                stats.txs_decoded, stats.actions, stats.unknown_selector, stats.decode_errors,
-            )
-            next_block = end + 1
+        except KeyboardInterrupt:
+            raise
         except Exception as e:  # noqa: BLE001
-            log.exception("poller: range %d..%d failed, will retry: %s", next_block, end, e)
-            time.sleep(cfg.poll_interval_s)
-            continue
-
-        if args.once:
-            break
+            log.exception("poller: unhandled exception, sleeping 60s before resume: %s", e)
+            time.sleep(60)
+            # Refresh next_block from DB cursor so we don't re-scan blocks
+            # that process_block_range already committed before the crash.
+            db_cur = storage.get_cursor()
+            if db_cur is not None and db_cur + 1 > next_block:
+                log.info("poller: advancing next_block %d -> %d from DB cursor", next_block, db_cur + 1)
+                next_block = db_cur + 1
 
     storage.close()
     return 0

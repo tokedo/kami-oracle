@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import logging
 import random
+import socket
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, TypeVar
 
+import requests.exceptions
 from web3 import Web3
 from web3.exceptions import Web3Exception
 from web3.types import BlockData, TxData, TxReceipt
@@ -18,9 +20,17 @@ T = TypeVar("T")
 
 # RPC faults we treat as transient. Non-transient faults (malformed request,
 # reverted view call) bubble up to the caller.
+#
+# The session-2 backfill died on `requests.exceptions.ConnectionError`
+# ("Remote end closed connection without response") after ~6h — it was not
+# covered by the previous narrower tuple. `RequestException` is the parent
+# of ConnectionError / ChunkedEncodingError / ReadTimeout / SSLError and
+# covers every transport-layer fault web3's HTTPProvider can raise.
 TRANSIENT_EXC = (
-    ConnectionError,
-    TimeoutError,
+    ConnectionError,              # stdlib (subclass of OSError on py3.3+)
+    TimeoutError,                 # stdlib
+    socket.error,                 # stdlib, covers raw socket faults
+    requests.exceptions.RequestException,
     Web3Exception,
 )
 
