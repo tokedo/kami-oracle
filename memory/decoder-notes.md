@@ -248,3 +248,104 @@ What this validation does NOT confirm (documented for future sessions):
 
 Conclusion: decode quality against this known-good operator is clean.
 Safe to proceed to 4-week backfill.
+
+## Investigation: action-mix divergence (session 2.5, 2026-04-18)
+
+The session-2 backfill crashed ~47k blocks in (cursor=26,850,306) with an
+unhandled `requests.exceptions.ConnectionError`. The partial DB (3,688
+actions, 3,757 raw_tx) shows an action mix nothing like the head
+validation:
+
+| rank | action_type      | count | head-validation % |
+|------|------------------|-------|-------------------|
+| 1    | `move`           | 972   | ~0.7%             |
+| 2    | `item_craft`     | 944   | ~2.3%             |
+| 3    | `skill_upgrade`  | 691   | ~1.9%             |
+| 4    | `lvlup`          | 532   | ~1.8%             |
+| 5    | `item_use`       | 178   | ~9% (feed)        |
+| …    | `harvest_start`  | **1** | **~46%**          |
+| …    | `harvest_stop`   | **1** | **~37%**          |
+
+The partial DB spans blocks 26,803,238 .. 27,778,603 but 99.95% of rows
+are in the early bucket 26,803,238 .. 26,850,244 (~47k blocks, ~17h of
+chain time 22 days ago). The two near-head harvest rows are stray
+artifacts from a Session-1 ingester test; unimportant.
+
+### Root cause: H1 confirmed — harvest systems were redeployed
+
+The MUD registry at `0x3B9B1223d876968B8Ba319CDdD4B4B6739B462AA` is
+stable across the window, but individual system-ID → address mappings
+are **not**. Probing the registry with `block_identifier=N` for
+`system.harvest.start` yields:
+
+| probe block | resolved harvest.start addr                   | note        |
+|-------------|-----------------------------------------------|-------------|
+| head        | `0x0777687Ec9FEB7349c23a19Ba7D11a1fe8cd35F1` | current     |
+| head-100k   | `0xA0b4E6F34d639d11262A80dDdCc6d891F1eb80ed` | ~2.3d ago   |
+| head-400k   | `0xA0b4E6F34d639d11262A80dDdCc6d891F1eb80ed` | ~9d ago     |
+| head-600k   | `0x3288687Ec346c9cf8Adea8772530191C3f029C8A` | ~14d ago    |
+| head-800k   | `0x04938bc48a11D38c4b6Fbb6BeE9FAAfbBb7A2208` | ~19d ago    |
+| head-960k   | `0x04938bc48a11D38c4b6Fbb6BeE9FAAfbBb7A2208` | ~22d ago    |
+
+Four distinct harvest.start deployments in 22 days. Similar picture for
+harvest.stop/collect/liquidate. `eth_getCode` at the current
+`0x0777687Ec…` address returns 14,562 bytes at head but **zero bytes**
+at block 26,820,000 — the contract did not exist yet.
+
+Our ingester resolves system addresses **once at startup against head**
+(`system_registry.resolve_systems`), then filters each block's txs by
+`to ∈ {registered addresses}`. Historical harvest txs targeted the
+*old* deployments; their `to_addr` didn't match any current address,
+so they were silently dropped at the match step — not even logged to
+`memory/unknown-systems.md` (that path fires only for matched-but-
+undecodable selectors).
+
+Systems whose addresses happened to be stable across the window
+(`system.account.move`, `system.craft`, `system.skill.upgrade`,
+`system.kami.level`, …) were captured correctly, which is why the
+captured mix is dominated by those.
+
+### Hypotheses H2, H3, H4
+
+- **H2 (partial blocks from RPC):** ruled out. Total tx throughput in
+  the early bucket looks consistent; the hole is category-specific,
+  not density-specific.
+- **H3 (head-block injection):** 2 near-head rows exist (block
+  27,778,601 and 27,778,603) but they target *current* addresses and
+  are almost certainly from an ingester test run late in Session 1.
+  Trivial artifact, will be wiped by the session-2.5 DB reset.
+- **H4 (harvest really was ~0% 22 days ago):** ruled out. H1 fully
+  explains the data and is confirmed by direct registry probes + code
+  size checks.
+
+### Implication for the 1-week window
+
+The *most recent* harvest.start redeployment (head-100k → head, i.e.
+current `0x0777687Ec…`) happened within the last ~2.3 days. A naive
+7-day backfill would therefore **still miss ~2/3 of historical
+harvest txs** — the older `0xA0b4E6F…` deployment covers roughly
+day -2.3 through day -9. Session 2.5 ships the 1-week window anyway
+(gives us a clean sample we can reason about and stays clear of the
+retention edge), but harvest coverage in the historical portion of
+that sample will be partial until the registry-snapshot fix lands.
+
+### Fix (proposed, OUT OF SCOPE for session 2.5)
+
+Three paths, in increasing complexity:
+
+1. **Selector-based filtering.** Ignore `to_addr`; match by
+   `tx.input[:4]` against a precomputed set of selectors across all
+   ABIs. The selector is a stable function signature — redeployments
+   don't change it. Downside: loses system-ID tagging at the match
+   step (recoverable by selector→system_id reverse map, since
+   selectors are effectively ABI-unique within the Kamigotchi universe).
+2. **Per-chunk registry resolution.** Re-resolve the system registry
+   at each backfill chunk boundary via `block_identifier`. Precise,
+   costs ~35 RPC calls every 500 blocks.
+3. **Historical address union.** At backfill startup, probe the
+   registry at ~10 block heights across the target window and union
+   the resulting system-ID → address sets. One-time cost, no mid-run
+   RPC overhead. Best fit for Stage 1.
+
+Recommend option 3 for session 3+. See
+`memory/next-steps.md` for the action item.
