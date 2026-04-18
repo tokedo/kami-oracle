@@ -19,3 +19,11 @@ itself. Commit hashes are filled in after the commit.
 - Probed `eth_getBlockReceipts` on the public Yominet RPC: supported but not a speedup, because blocks have ≤1 matched tx on average. Kept per-tx receipt; bumped `RetryPolicy` (attempts 5→8, max delay 30s→60s) for multi-day backfill resilience (`276e9f4`).
 - **Public RPC retention is ~22.7 days, not 28** — a naive 4-week backfill burned retries on every historical fetch. `backfill.py` now binary-searches the earliest retained block at startup and clamps `start_block + 20k` to stay inside the load-balancer's fuzzy retention edge (`c87710f`). Documented for human decision: archive RPC vs shorter window.
 - 4-week backfill launched in detached `screen` session `kami-backfill` (log at `logs/backfill.log`); projected ~7.7 days @ 2.4 blocks/sec over ~980k blocks.
+
+## Session 2.5 — 2026-04-18
+
+- Diagnosed the "action-mix divergence" in the partial session-2 DB: harvest system contracts are redeployed periodically (4 distinct addresses across 22 days of probes), but `resolve_systems()` only looks up head addresses — so historical harvest txs were silently dropped at the match step (never even reaching the decoder). H1 confirmed; H2/H3/H4 ruled out. Fix (registry-snapshot) deferred to session 3+ (`076196a`).
+- Widened `TRANSIENT_EXC` to catch `requests.RequestException` + `socket.error` — session-2 backfill died ~6h in on a bare `requests.ConnectionError` that slipped past the previous narrower tuple. Added 11 parametrized tests covering ConnectionError, ChunkedEncodingError, ReadTimeout, SSLError, and the generic parent (`88c9024`).
+- Added outer survival loops to `backfill.main()` and `poller.main()`: any unhandled exception logs + sleeps 60s + refreshes cursor from DB + resumes. No more "dead at 2am, human notices at 8am" (`88c9024`).
+- Shrank rolling window 28 → 7 days during the investigation phase: stays clear of the ~22.7-day RPC retention edge, gets a clean sample fast, makes the registry-snapshot fix a smaller problem. Backfill CLI gains `--days` flag preferred over `--weeks`. Session-2 DB backed up to `db/kami-oracle.duckdb.session2.bak` (`4316470`).
+- Relaunched backfill in `kami-backfill` screen session — 420k blocks, ~2 days projected.

@@ -2,99 +2,123 @@
 
 ## Session 3 — pick up from here
 
-### Current state at session 2 end (2026-04-17 21:16 UTC)
+### Current state at session 2.5 end (2026-04-18 ~14:00 UTC)
 
-- All Session 1/2 ABI questions resolved; decode coverage 100% on
-  recent blocks.
-- 3-tier overlay policy codified in CLAUDE.md.
-- **4-week backfill is running** in detached screen session
-  `kami-backfill` (PID 7525 at launch). Log at `logs/backfill.log`.
-  Expected runtime ~7.7 days over ~980k reachable blocks. First
-  reattach command:
-  ```
-  screen -r kami-backfill        # Ctrl+a, d to detach again
-  tail -f logs/backfill.log
-  ```
-- Poller is **not** running; do NOT start it until backfill is done
-  (DuckDB single-writer constraint). See `memory/ops.md` for commands.
-- `questions-for-human.md` is empty (no blockers).
+- Session 2.5 wrapped three goals: investigation of the action-mix
+  mystery, ingester hardening against transport faults, and shrinking
+  the rolling window from 4 weeks to 1 week. See
+  `memory/improvements.md` for commit hashes.
+- **1-week backfill is running** in detached screen session
+  `kami-backfill`. Log at `logs/backfill.log`. Target: 420k blocks
+  (head-0..head-420k). Start block 27,391,858; projected ~2 days
+  at 2.4 blocks/sec.
+- DB file: `db/kami-oracle.duckdb` (fresh, bootstrapped by the
+  backfill launch). Session-2 DB backed up at
+  `db/kami-oracle.duckdb.session2.bak` — keep until session 3
+  confirms healthy data, then delete.
+- Poller NOT running. Do not start until backfill finishes.
+- `questions-for-human.md` is empty.
 
-### Session 2 finding — RPC retention limit (no action blocks Session 3)
+### Headline finding from session 2.5 — registry-snapshot bug
 
-Public Yominet RPC at
-`jsonrpc-yominet-1.anvil.asia-southeast.initia.xyz` retains **~22.7
-days (~3.24 weeks)** of history, not the 28 days CLAUDE.md prescribes.
-`backfill.py` probes the edge and clamps automatically; data reachable
-is ~22 days plus whatever accumulates via the poller tail going
-forward. Human decision (whenever — not session-3 blocking): accept the
-shorter window, set up an archive RPC, or let the oracle grow locally
-over months of poller uptime. Full discussion in
-`memory/decoder-notes.md` under "RPC retention limit".
+The session-2 backfill's partial DB showed move/item_craft/skill_upgrade
+dominating and harvest ~0% — completely different from head
+validation. Root cause is NOT a decode bug: **harvest system
+contracts are redeployed periodically** (at least 4 distinct
+harvest.start addresses appeared across a 22-day probe). Our
+ingester resolves system addresses once at startup against head, so
+historical harvest txs targeting *older* deployments were silently
+dropped at the match-to-system step (they never even reached the
+decoder).
+
+Most recent harvest.start redeployment was within the last ~2.3
+days. Even the 1-week backfill will miss ~2/3 of historical harvest
+txs until this is fixed.
+
+Full analysis + proposed fix in `memory/decoder-notes.md` under
+"Investigation: action-mix divergence (session 2.5)".
 
 ### Do in this order
 
-1. **Check backfill health (no DB queries while writer is live).**
+1. **Check backfill health.** The session-2.5 outer survival loop
+   should keep it alive through transient RPC faults, but verify.
    ```
-   screen -ls                            # confirm kami-backfill alive
-   tail -200 logs/backfill.log           # recent chunk messages + errors
+   screen -ls                            # kami-backfill alive?
+   tail -200 logs/backfill.log           # recent chunks + any resume logs
    grep -c "done (actions" logs/backfill.log   # chunk count
+   grep "backfill: unhandled" logs/backfill.log  # any resume events?
    ```
-   **Do not open the DuckDB file** while the backfill is running — DuckDB
-   holds an exclusive file lock and even `read_only=True` connections
-   error out with `IOException: Conflicting lock is held`. Infer progress
-   from the backfill log instead (each 500-block chunk logs
-   `backfill: START..END done (actions=N, running total=N)`). If the log
-   has been silent for >10min and the process is still alive, it's
-   stuck in retries on a pruned-block tail — reattach with
-   `screen -r kami-backfill` and observe.
-
-   If it died mid-run, the log's last `done` line tells you the resume
-   point: `python -m ingester.backfill --from-block <last_end+1> --to-block <original_head>`.
+   Don't open the DuckDB file while the writer is running — exclusive
+   file lock. Infer progress from chunk logs.
 
 2. **If backfill is complete (cursor reached head-at-launch):**
    - Capture summary: row counts, action-type distribution, unique
      kami count, unique operator count, block range, wall time.
-     Commit as `data: 4-week backfill complete`.
-   - Start the continuous poller in screen:
-     ```
-     screen -dmS kami-poller -L -Logfile logs/poller.log \
-       bash -c 'cd ~/kami-oracle && exec .venv/bin/python -m ingester.poller'
-     ```
-     Document in `memory/ops.md`.
-   - Run the prune daily cron equivalent (or a one-shot test):
-     `python -m ingester.prune`.
+     Commit as `data: 7-day backfill complete`.
+   - **Validate against head**: scan last 2000 blocks with
+     `scripts/validate_decode.py` and compare its action mix to the
+     DB's last-2000-block slice. Should match closely; a mismatch
+     suggests the registry-snapshot bug is still biting.
+   - **Prime task: implement the registry-snapshot fix** (see below)
+     *before* starting the poller. Otherwise the poller's live data
+     is clean but the historical backfill portion will continue to
+     underreport harvest.
+   - Once fix is in, re-run backfill with `--days 7` (idempotent) to
+     pick up missed harvest txs.
 
 3. **If backfill is still running:**
    - Don't touch it. Don't start the poller.
-   - Do one or more of the read-only tasks below; return to the
-     backfill-health check at start of next session.
+   - Work on the registry-snapshot fix (design/sketch/tests) against
+     a scratch DB. Keep hands off `db/kami-oracle.duckdb`.
 
-### Read-only tasks (safe while backfill runs — no DB reads)
+### Session 3 prime task — registry-snapshot fix
 
-DuckDB file-mode takes an exclusive lock, so you **cannot query the
-live DB** while the backfill writer is running. Work that does not
-touch `db/kami-oracle.duckdb`:
+**Problem**: `system_registry.resolve_systems()` runs once at
+startup, at head. Historical backfill uses those head addresses to
+filter `to_addr`, so any system redeployed inside the backfill
+window leaks txs at the match step (silently — no entry in
+`memory/unknown-systems.md`).
 
-- Review `memory/unknown-systems.md` — anything new surfaced by the
-  backfill's incremental runs? Apply Tier-A/B/C per the CLAUDE.md
-  overlay policy. (The backfill appends to this file as it goes.)
-- Scan forward with `scripts/validate_decode.py` on a fresh range near
-  head — it's dry-run by default and doesn't touch the DB. Useful for
-  catching any new action types before they land in production data.
-- Inspect `logs/backfill.log` for recurring RPC failure patterns;
-  consider widening `RetryPolicy` further if so.
-- Draft the Phase B enrichment query for harvest-cycle stitching
-  (`harvest_start → harvest_stop / harvest_collect` on
-  `metadata.harvest_id`) against a scratch DB so it's ready to run the
-  moment the backfill finishes.
+**Proposed fix (option 3 from decoder-notes)**: At backfill startup,
+probe the registry at ~10 evenly-spaced block heights across the
+target window. Union the resulting system-ID → address sets into a
+multi-address-per-system registry. The filter becomes "match if
+to_addr is in {current or any historical address for this system}";
+the decoder selects the right ABI by system_id regardless of which
+address was the match. One-time startup cost (~350 RPC calls, ~2
+minutes), no mid-run overhead.
 
-### Deferred (not Session 3 unless human asks)
+Sketch:
+- Extend `SystemRegistry` to hold `addresses: set[str]` per system
+  (currently one).
+- Add `probe_historical_systems(client, world_address, abi_dir,
+  block_heights: list[int])` that calls `resolve_systems` at each
+  height (via `block_identifier=N`) and unions the results.
+- Call it from `backfill.main` once `start` and `head` are computed,
+  with `block_heights = linspace(start, head, 10)`.
+- Poller path unchanged: poller tails forward from head so only the
+  current registry matters (but the API is still safe to use —
+  historical probing returns the current set unioned with nothing).
+
+Write tests that exercise a two-address case: ensure decode still
+routes by system_id and that the extra address shows up in
+`known_addresses()`.
+
+After landing, **re-run the backfill from scratch** on a wiped DB
+to get a clean representative sample. Commit the rerun results as
+`data: 7-day backfill complete (registry-snapshot fix)`.
+
+### Deferred (not session 3 unless human asks)
 
 - `kami_static` backfill worker (per-kami trait snapshots via
-  GetterSystem) — waiting on steady-state ingest.
-- Several system ABIs absent from the vendored snapshot (equip,
-  trade, marketplace, kami721/portal). Wait for upstream re-vendoring
-  unless they surface in `memory/unknown-systems.md`.
+  GetterSystem). Waiting on steady-state ingest.
+- Upstream ABI re-vendoring (equip, trade, marketplace, kami721).
+  Wait for a kamigotchi-context release unless something critical
+  surfaces in `memory/unknown-systems.md`.
 - Concurrency refactor for faster backfills. Current single-threaded
-  pipeline is 2.4 blocks/s; a thread-pooled get_block / receipt fetch
-  could 3–5x this. Not worth it for Stage 1 proof-of-concept.
+  pipeline is ~2.4 blocks/s; a thread-pooled get_block + receipt
+  could 3–5x this. Not worth it for Stage 1.
+- ~80 `system.quest.accept` selector `0x09c90324` entries in
+  `memory/unknown-systems.md`. Tier B per overlay policy — needs
+  either a system-ids.md update from upstream or deployed-bytecode
+  confirmation of the signature before we can add an overlay.

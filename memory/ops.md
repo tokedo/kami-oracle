@@ -2,16 +2,23 @@
 
 Long-running processes — commands, expected lifetime, resume steps.
 
-## Detached 4-week backfill (session 2, started 2026-04-17)
+## Detached 7-day backfill (session 2.5, started 2026-04-18)
 
 Launched via `screen` so an SSH drop does not kill it. Screen is
 durable across logouts; `screen -r kami-backfill` reattaches.
+
+Window was 4 weeks in session 2 but the backfill died ~6h in on a
+bare `requests.ConnectionError`, and the partial data showed an
+action-mix that flagged a registry-snapshot bug (see
+`memory/decoder-notes.md` → "action-mix divergence"). Session 2.5
+shrank the window to 1 week, hardened the retry/survival loop, and
+backed up the session-2 DB to `db/kami-oracle.duckdb.session2.bak`.
 
 **Launch command:**
 
 ```
 screen -dmS kami-backfill -L -Logfile ~/kami-oracle/logs/backfill.log \
-  bash -c 'cd ~/kami-oracle && exec .venv/bin/python -m ingester.backfill --weeks 4'
+  bash -c 'cd ~/kami-oracle && exec .venv/bin/python -m ingester.backfill --days 7'
 ```
 
 Flags:
@@ -19,9 +26,8 @@ Flags:
 - `-L -Logfile ...` — tee screen output to a file so session 3 can
   read progress without reattaching.
 
-**Expected runtime:** ~7.7 days at measured 2.4 blocks/sec on the
-public Yominet RPC (200-block dry-run, 2026-04-17 21:08). 1.6M blocks
-total. DB grows to a few hundred MB–~GB (actions > raw_tx volume).
+**Expected runtime:** ~2 days at measured 2.4 blocks/sec on the
+public Yominet RPC. 420k blocks total. DB grows to ~100-200 MB.
 
 **Check progress:**
 
@@ -37,7 +43,13 @@ holds an exclusive file lock even against `read_only=True` connections
 Read progress from the backfill log, not the DB. Each chunk emits
 `backfill: START..END done (actions=N, running total=N)`.
 
-**If it dies mid-run**, resume is safe. The cursor advances monotonically;
+**If it dies mid-run**, the outer survival loop (session 2.5) should
+catch the exception, sleep 60s, refresh from the DB cursor, and
+resume — no manual intervention needed in the common case. Check the
+log for `backfill: unhandled exception, sleeping 60s before resume`.
+
+If the process has actually exited (screen session gone), resume is
+still safe manually: the cursor advances monotonically;
 `--from-block <cursor+1> --to-block <original_head>` continues exactly
 where it stopped. The pipeline is idempotent via `ON CONFLICT DO NOTHING`
 on `raw_tx.tx_hash` and `kami_action.id`, so re-processing overlapping
@@ -61,6 +73,7 @@ automatically filled.
 
 ## Prune — defer to Phase A tail
 
-`python -m ingester.prune` enforces the 28-day rolling window. Run
-daily once the backfill+poller are steady-state. Not needed during
-initial population (we have ≤4 weeks of data by definition).
+`python -m ingester.prune` enforces the `KAMI_ORACLE_WINDOW_DAYS`
+rolling window (Stage 1: 7 days). Run daily once the backfill+poller
+are steady-state. Not needed during initial population (we have
+≤1 week of data by definition).
