@@ -55,21 +55,75 @@ where it stopped. The pipeline is idempotent via `ON CONFLICT DO NOTHING`
 on `raw_tx.tx_hash` and `kami_action.id`, so re-processing overlapping
 ranges is harmless.
 
-## Poller — NOT started this session
+## Co-hosted serve (session 3 — poller + read-only HTTP in one process)
 
-Do **not** run the poller in parallel with the backfill: DuckDB does not
-support concurrent writers, and `kami_action.id` idempotency won't save
-us if both processes hold the DB file open. Start the poller only after
-the backfill finishes (or is explicitly stopped). When ready:
+Session 3 introduces `ingester.serve`, which runs the ingest poller
+and the FastAPI read-only query layer inside **one Python process**
+sharing a single DuckDB connection. DuckDB holds a per-process
+exclusive file lock, so two independent processes can't both open the
+file; co-hosting sidesteps the issue and is the Stage-1 stand-in for
+a Phase-D MCP server.
+
+**Launch command:**
+
+```
+screen -dmS kami-oracle -L -Logfile ~/kami-oracle/logs/serve.log \
+  bash -c 'cd ~/kami-oracle && exec .venv/bin/python -m ingester.serve'
+```
+
+Only one of `{serve, poller, backfill}` may hold the DB at a time —
+the standalone `ingester.poller` entrypoint is retained for use when
+the query layer is not wanted, but **do not run it alongside serve**.
+
+**HTTP bind:** `127.0.0.1:8787` by default. Override via
+`KAMI_ORACLE_API_BIND=127.0.0.1:PORT`. The process refuses to bind to
+`0.0.0.0` / `::` / wildcard hosts — there's no auth layer yet;
+exposure is a Phase-D + ADR decision.
+
+**Health check (from a second SSH session):**
+
+```
+curl -s http://127.0.0.1:8787/health | jq .
+```
+
+Expected shape:
+
+```json
+{
+  "status": "ok",
+  "cursor": {"last_block_scanned": 27970000, "last_block_timestamp": "..."},
+  "row_counts": {"raw_tx": N, "kami_action": M, "system_address_snapshot": K},
+  "registry": {"n_systems": 34, "n_addresses": 40}
+}
+```
+
+Watch `last_block_scanned` advance across successive calls to confirm
+the poller thread is alive. Other endpoints worth hitting for a
+quick smoke test:
+
+```
+curl -s http://127.0.0.1:8787/actions/types?since_days=7 | jq .
+curl -s http://127.0.0.1:8787/registry/snapshot | jq '.n_addresses'
+curl -s 'http://127.0.0.1:8787/operator/0x86aDb8f741E945486Ce2B0560D9f643838FAcEC2/summary?since_days=7' | jq .
+```
+
+**Graceful shutdown:** `SIGTERM`/`SIGINT` (Ctrl+C inside the screen)
+flips a stop event that drains the poller and tells uvicorn to stop
+accepting new requests. In-flight HTTP requests complete, then the
+DB closes. 30s join timeout on the poller thread; if it doesn't exit
+in time a warning is logged but the process still terminates.
+
+## Standalone poller (legacy, retained for emergencies)
+
+If the HTTP layer is broken or you just want ingest-only operation:
 
 ```
 screen -dmS kami-poller -L -Logfile ~/kami-oracle/logs/poller.log \
   bash -c 'cd ~/kami-oracle && exec .venv/bin/python -m ingester.poller'
 ```
 
-The poller reads the cursor at startup and continues from
-`cursor + 1`, so any gap between backfill-complete and poller-start is
-automatically filled.
+Same cursor semantics as `serve`. **Do not run alongside `serve` or
+`backfill`** — DuckDB per-process lock.
 
 ## Prune — defer to Phase A tail
 
