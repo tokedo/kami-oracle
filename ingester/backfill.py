@@ -25,7 +25,12 @@ from .config import configure_logging, load_config
 from .decoder import Decoder
 from .ingest import process_block_range
 from .storage import Storage, read_schema_sql
-from .system_registry import resolve_systems
+from .system_registry import (
+    SystemRegistry,
+    evenly_spaced_probes,
+    probe_historical_systems,
+    resolve_systems,
+)
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +50,12 @@ BLOCKS_PER_WEEK = 7 * BLOCKS_PER_DAY
 # blocks ≈ 8h of real time — a few hours of history lost, several hours of
 # retry time saved during backfill.
 RETENTION_BUFFER_BLOCKS = 20_000
+
+# Number of evenly-spaced block heights to probe the system registry at,
+# across the backfill window. Captures historical system-contract
+# redeployments so their txs aren't silently dropped at the match step.
+# 10 probes ≈ ~90s one-time startup cost on the public RPC.
+DEFAULT_REGISTRY_PROBES = 10
 
 
 def earliest_retained_block(client: ChainClient, head: int, floor: int) -> int:
@@ -90,6 +101,10 @@ def main() -> int:
                     help="Explicit end block (inclusive, default: head).")
     ap.add_argument("--chunk-size", type=int, default=500,
                     help="Blocks per batch (default 500).")
+    ap.add_argument("--registry-probes", type=int, default=DEFAULT_REGISTRY_PROBES,
+                    help="Block heights across the window to probe the system registry "
+                         "at. Unions resolved addresses so historical redeployments are "
+                         "captured (default 10).")
     ap.add_argument("--dry-run", action="store_true", help="Do not write to DB.")
     args = ap.parse_args()
 
@@ -134,7 +149,48 @@ def main() -> int:
     if storage is not None:
         storage.bootstrap(read_schema_sql(REPO_ROOT))
 
-    registry = resolve_systems(client, cfg.world_address, cfg.abi_dir)
+    # Historical registry snapshot: probe the world's registry at several
+    # block heights across the backfill window and union all observed
+    # system-id -> address mappings. Without this, historical txs that
+    # targeted a since-redeployed system address are silently dropped at
+    # the match step (session 2.5 investigation, decoder-notes.md).
+    if args.registry_probes > 1 and head > start:
+        probe_heights = evenly_spaced_probes(start, head, n=args.registry_probes)
+        log.info(
+            "backfill: probing system registry at %d heights across [%d, %d]",
+            len(probe_heights), start, head,
+        )
+        registry = probe_historical_systems(
+            client, cfg.world_address, cfg.abi_dir, probe_heights,
+        )
+    else:
+        registry = resolve_systems(client, cfg.world_address, cfg.abi_dir)
+
+    # Union with any snapshot persisted by prior sessions so historical
+    # addresses observed earlier remain active candidates even if the
+    # current probe window missed them.
+    if storage is not None:
+        prior = storage.load_system_address_snapshot()
+        if prior:
+            prior_reg = SystemRegistry.from_snapshot_rows(prior)
+            newly = {a for a in prior_reg.known_addresses() if a not in registry.known_addresses()}
+            if newly:
+                log.info(
+                    "backfill: registry extended with %d address(es) from prior snapshot",
+                    len(newly),
+                )
+            registry.extend(prior_reg)
+        storage.upsert_system_address_snapshot(registry.to_snapshot_rows())
+
+    # Log the full registry (one line per system -> address) so operators can
+    # audit which deployments the backfill will match against.
+    for sid in sorted(registry.system_ids()):
+        addrs = sorted(registry.addresses_for_system(sid))
+        log.info(
+            "registry: %s -> %d address(es): %s",
+            sid, len(addrs), ", ".join(addrs),
+        )
+
     decoder = Decoder(cfg.abi_dir, registry)
     vendor_sha = cfg.vendor_sha_path.read_text().strip() if cfg.vendor_sha_path.exists() else None
 

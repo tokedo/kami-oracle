@@ -21,7 +21,7 @@ from .config import configure_logging, load_config
 from .decoder import Decoder
 from .ingest import process_block_range
 from .storage import Storage, read_schema_sql
-from .system_registry import resolve_systems
+from .system_registry import SystemRegistry, resolve_systems
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +29,12 @@ STOP = False
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 UNKNOWN_LOG = REPO_ROOT / "memory" / "unknown-systems.md"
+
+# Re-probe the system registry every N seconds during steady-state tailing
+# to detect fresh system-contract redeployments. 6h is comfortably shorter
+# than the 2.3-day gap between the two most recent harvest.start
+# deployments observed during session 2.5 and costs ~90s of RPC per probe.
+REGISTRY_REPROBE_INTERVAL_S = 6 * 3600
 
 
 def _on_signal(signum, _frame):
@@ -59,6 +65,16 @@ def main() -> int:
     storage = Storage(cfg.db_path)
     storage.bootstrap(read_schema_sql(REPO_ROOT))
     registry = resolve_systems(client, cfg.world_address, cfg.abi_dir)
+    # Union with stored snapshot so a poller-only run (no recent backfill)
+    # still knows about historical deployments — matters for the API
+    # queries over older rows, and for the unusual case of blocks between
+    # a prior cursor and head that are still in-window for the reprobe.
+    prior = storage.load_system_address_snapshot()
+    if prior:
+        prior_reg = SystemRegistry.from_snapshot_rows(prior)
+        registry.extend(prior_reg)
+    storage.upsert_system_address_snapshot(registry.to_snapshot_rows())
+    last_reprobe_ts = time.time()
     decoder = Decoder(cfg.abi_dir, registry)
 
     vendor_sha = cfg.vendor_sha_path.read_text().strip() if cfg.vendor_sha_path.exists() else None
@@ -80,6 +96,23 @@ def main() -> int:
     # alive across nightly RPC blips without needing a human minder.
     while not STOP:
         try:
+            now_ts = time.time()
+            if now_ts - last_reprobe_ts >= REGISTRY_REPROBE_INTERVAL_S:
+                try:
+                    fresh = resolve_systems(client, cfg.world_address, cfg.abi_dir)
+                    new_addrs = registry.extend(fresh)
+                    if new_addrs:
+                        for a in sorted(new_addrs):
+                            info = registry.get_by_address(a)
+                            log.info(
+                                "registry: new system address observed: %s -> %s",
+                                info.system_id if info else "?", a,
+                            )
+                        storage.upsert_system_address_snapshot(registry.to_snapshot_rows())
+                except Exception as e:  # noqa: BLE001
+                    log.warning("poller: registry re-probe failed: %s", e)
+                last_reprobe_ts = now_ts
+
             try:
                 head = client.block_number()
             except Exception as e:  # noqa: BLE001

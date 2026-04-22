@@ -97,3 +97,31 @@ CREATE TABLE IF NOT EXISTS ingest_cursor (
     vendor_sha           VARCHAR,              -- kami_context UPSTREAM_SHA
     updated_at           TIMESTAMP  NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- ---------------------------------------------------------------------------
+-- system_address_snapshot: every (system_id, address) pair the ingester has
+-- ever observed, with the earliest and latest probe blocks at which the
+-- address resolved to that system_id.
+--
+-- Kamigotchi periodically redeploys system contracts (see decoder-notes
+-- "action-mix divergence" investigation, session 2.5). Resolving the
+-- registry once at head misses historical deployments, so any tx in the
+-- backfill window that targeted a previous deployment gets silently
+-- dropped at the match step. The ingester now probes the registry at
+-- multiple block heights across the target window and unions the
+-- resulting system-ID -> address sets into this table; every address
+-- observed at any probe becomes a candidate in the match step, while
+-- the decoder still dispatches on system_id (same ABI across
+-- deployments).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS system_address_snapshot (
+    system_id         VARCHAR   NOT NULL,   -- e.g. "system.harvest.start"
+    address           VARCHAR   NOT NULL,   -- checksummed, 0x-prefixed
+    abi_name          VARCHAR   NOT NULL,   -- filename under kami_context/abi/
+    first_seen_block  BIGINT,               -- earliest probe block the pair was observed
+    last_seen_block   BIGINT,               -- latest probe block the pair was observed
+    ingested_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (system_id, address)
+);
+
+CREATE INDEX IF NOT EXISTS idx_system_snapshot_addr ON system_address_snapshot(address);

@@ -110,9 +110,23 @@ class ChainClient:
             "get_transaction",
         )
 
-    def call_contract_fn(self, contract: Any, fn_name: str, *args: Any) -> Any:
+    def call_contract_fn(
+        self,
+        contract: Any,
+        fn_name: str,
+        *args: Any,
+        block_identifier: int | str | None = None,
+    ) -> Any:
+        if block_identifier is None:
+            return _retry(
+                lambda: getattr(contract.functions, fn_name)(*args).call(),
+                self.retry,
+                f"{fn_name}(...)",
+            )
         return _retry(
-            lambda: getattr(contract.functions, fn_name)(*args).call(),
+            lambda: getattr(contract.functions, fn_name)(*args).call(
+                block_identifier=block_identifier
+            ),
             self.retry,
-            f"{fn_name}(...)",
+            f"{fn_name}(...)@{block_identifier}",
         )
