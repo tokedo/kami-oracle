@@ -3,3 +3,8 @@ duckdb>=0.10
 eth-abi>=5.0
 python-dotenv>=1.0
 pytest>=8.0
+# Co-hosted read-only HTTP query layer (session 3, bound to 127.0.0.1 only).
+fastapi>=0.110,<0.120
+uvicorn[standard]>=0.27,<0.40
+# httpx is used by the FastAPI TestClient in tests/test_api.py.
+httpx>=0.27,<0.30
