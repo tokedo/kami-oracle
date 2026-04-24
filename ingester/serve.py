@@ -299,6 +299,7 @@ def main() -> int:
         registry,
         api_token=cfg.api_token,
         bind_host=host,
+        rate_limit_per_min=cfg.rate_limit_per_min,
     )
 
     # Build uvicorn server manually so we can drive a graceful shutdown

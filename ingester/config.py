@@ -25,6 +25,7 @@ class Config:
     log_level: str
     api_token: str | None
     prune_interval_s: float
+    rate_limit_per_min: int
 
     @property
     def world_address(self) -> str:
@@ -62,6 +63,7 @@ def load_config() -> Config:
         log_level=os.environ.get("KAMI_ORACLE_LOG_LEVEL", "INFO").upper(),
         api_token=api_token,
         prune_interval_s=float(os.environ.get("KAMI_ORACLE_PRUNE_INTERVAL_S", "3600")),
+        rate_limit_per_min=int(os.environ.get("KAMI_ORACLE_RATE_LIMIT_PER_MIN", "60")),
     )
 
 

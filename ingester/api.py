@@ -26,6 +26,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from .ratelimit import RateLimitMiddleware
 from .sql import (
     SqlExecutionError,
     SqlTimeoutError,
@@ -139,6 +140,7 @@ def build_app(
     *,
     api_token: str | None = None,
     bind_host: str = "127.0.0.1",
+    rate_limit_per_min: int | None = None,
 ) -> FastAPI:
     """Build the FastAPI app bound to a specific ``Storage`` instance.
 
@@ -161,6 +163,9 @@ def build_app(
         description="Read-only query layer over the Kamigotchi action DB (Stage 1).",
         version="0.1.0",
     )
+
+    if rate_limit_per_min is not None and rate_limit_per_min > 0:
+        app.add_middleware(RateLimitMiddleware, limit_per_min=rate_limit_per_min)
 
     async def require_token(authorization: str | None = Header(default=None)) -> None:
         if api_token is None:
