@@ -492,3 +492,62 @@ in `ingester/api.py`:
 **Status: serve launch successful**, founder-testing guide published
 at `memory/founder-testing.md`.
 
+
+## Session 4 internal plane smoke test (2026-04-24 22:20 UTC)
+
+Ran after the systemd cutover and non-loopback bind landed. Token
+generated via `secrets.token_urlsafe(32)`, stored only in `.env`
+(gitignored) under `KAMI_ORACLE_API_TOKEN`. Service managed by
+`kami-oracle.service` (active, listening on `0.0.0.0:8787`).
+
+**Bearer-token auth**
+
+| request                                        | expected | actual |
+|------------------------------------------------|----------|--------|
+| `GET /health` (no auth)                        | 200      | 200 ✓  |
+| `GET /actions/types?since_days=7` (no auth)    | 401      | 401 ✓  |
+| `GET /actions/types?since_days=7` (with token) | 200      | 200 ✓  |
+
+`/actions/types?since_days=7` with token returned `total=222,883` —
+consistent with continued ingest since the 3.5 smoke (was 214k). Top
+types: harvest_stop 44.6%, harvest_start 35.3%, feed 8.8%,
+skill_upgrade 2.7%, lvlup 2.4%.
+
+**`/sql` plane**
+
+Happy path — `SELECT kami_id, COUNT(*) FROM kami_action WHERE
+action_type='harvest_start' AND block_timestamp > now() - INTERVAL 7
+DAY GROUP BY 1 ORDER BY 2 DESC LIMIT 5` returned 5 rows, top kami
+613 starts, latency 79 ms.
+
+Rejection — `DROP TABLE kami_action` returned HTTP 400 with body
+`{"detail":{"error":"validation","detail":"leading keyword 'DROP' is
+not allowed; must be one of ['DESCRIBE','EXPLAIN','PRAGMA','SELECT',
+'SHOW','SUMMARIZE','WITH']"}}`.
+
+**Network bind**
+
+```
+$ ss -tlnp | grep 8787
+LISTEN 0 2048 0.0.0.0:8787 0.0.0.0:* users:(("python",pid=153726,fd=18))
+```
+
+Startup log line as expected:
+```
+WARNING serve: API listening on 0.0.0.0:8787 — auth required (non-loopback bind)
+```
+
+**Data-quality note** (not blocking, flag for Session 6+): the
+`harvest_stop` and `harvest_collect` rows have NULL `kami_id` in
+kami_action. A `GROUP BY kami_id` on those action_types collapses to
+a single null bucket holding ~103k rows. `harvest_start` populates
+`kami_id` correctly. Cause is likely decoder-side: the stop/collect
+paths probably dereference `harvest_id → kami_id` via a lookup that
+isn't available at decode time. Worth revisiting once `kami_static`
+backfill lands — might be resolvable with a post-decode join step or
+by pulling the kami_id from a different calldata slot.
+
+**Status**: internal query plane is live and authenticated. Service
+survives crashes (systemd Restart=always) and VM reboots (enabled).
+7-day window now self-prunes via the daemon thread at 3600s cadence.
+
