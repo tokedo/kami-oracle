@@ -1,165 +1,129 @@
-# Founder Testing Guide — kami-oracle HTTP (Session 3.5 hand-off)
+# Founder Testing Guide — kami-oracle public plane (Session 5 hand-off)
 
-The co-hosted serve process runs on the oracle VM, bound to
-`127.0.0.1:8787`. This guide is for testing it from your laptop.
+The oracle is now publicly reachable over HTTPS. Phase D was
+authorized 2026-04-24; see `memory/phase-d-transition.md` for the
+decision record.
 
-## Reach the API from your laptop
+## Reach the API from anywhere
 
-The API is loopback-only on the VM. Open an SSH tunnel and it becomes
-local to your laptop:
+- **Public URL**: `https://136-112-224-147.sslip.io`
+- **Auth**: `Authorization: Bearer <token>` on every route except
+  `/health`. Token is in the VM's `~/kami-oracle/.env` under
+  `KAMI_ORACLE_API_TOKEN`. Pull it with:
+  ```bash
+  gcloud compute ssh kami-oracle --zone=us-central1-a \
+      --project=kami-agent-prod \
+      --command "grep '^KAMI_ORACLE_API_TOKEN=' ~/kami-oracle/.env | cut -d= -f2-"
+  ```
+- **Rate limit**: 60 req/min per token, fixed window. `/health`
+  is exempt. 429s come back with a `Retry-After` header.
+
+No SSH tunnel needed anymore — just `curl https://…` from your
+laptop.
 
 ```bash
-gcloud compute ssh kami-oracle --zone=us-central1-a \
-  --project=kami-agent-prod -- -L 8787:127.0.0.1:8787 -N
+curl -s https://136-112-224-147.sslip.io/health | jq .
 ```
 
-Leave that running in one terminal. In another, hit the API as if it
-were local:
+## Colab
 
-```bash
-curl -s http://127.0.0.1:8787/health | jq .
-```
+Starter notebook: `scripts/colab_starter.ipynb` in the repo. Open it
+in Colab, then:
 
-To stop the tunnel: Ctrl+C the `gcloud` process.
+1. Tools → Secrets → add `KAMI_ORACLE_TOKEN`, paste the bearer.
+2. Toggle "Notebook access" so the cell can read it.
+3. Run cells top-to-bottom.
+
+The notebook ships a `sql(query, limit=1000)` helper that returns a
+`pandas.DataFrame`. Three worked examples:
+- top 20 harvesters (count of `harvest_start` per kami) over 7d
+- action-type histogram cross-checked against `/actions/types`
+- bpeon operator timeline (the founder's reference account)
 
 ## Endpoint catalog
 
-All responses are JSON. `uint256` values (`kami_id`, `amount`,
-`harvest_id`) are decimal strings to stay safe for JS consumers.
+All endpoints take `Authorization: Bearer <token>` unless noted. JSON
+responses; `uint256` values (`kami_id`, `amount`) are decimal strings.
 
-### `GET /health`
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET  | `/health` | Liveness + cursor + row counts. **No auth.** |
+| GET  | `/actions/types?since_days=N` | Action-type histogram. `since_days ∈ [1, 28]`. |
+| GET  | `/actions/recent?limit=N` | Most recent decoded actions. `limit ∈ [1, 2000]`. |
+| GET  | `/nodes/top?since_days=N&limit=M` | Top nodes by `harvest_start` count. |
+| GET  | `/operator/{addr}/summary?since_days=N` | All actions by an operator address. |
+| GET  | `/kami/{kami_id}/summary?since_days=N` | Per-kami activity summary. |
+| GET  | `/kami/{kami_id}/actions?since_days=N&limit=M` | Per-kami raw action list. |
+| GET  | `/registry/snapshot` | System-contract address history. |
+| POST | `/sql` | Bounded read-only SQL. SELECT-only, 10 s timeout, 10 k row cap. |
+| POST | `/backup` | Trigger `EXPORT DATABASE`. **Loopback-only** (cron uses it). |
 
-Service liveness + cursor + row counts + registry summary.
+`POST /sql` body:
+```json
+{"q": "SELECT … FROM kami_action …", "limit": 1000}
+```
+Response: `{"columns": [...], "rows": [[...], ...], "row_count": N,
+"truncated": bool, "latency_ms": N}`.
+
+## Service control (on the VM)
 
 ```bash
-curl -s http://127.0.0.1:8787/health | jq .
+sudo systemctl status   kami-oracle    # ingester + FastAPI
+sudo systemctl restart  kami-oracle
+sudo systemctl reload   caddy          # after editing /etc/caddy/Caddyfile
+sudo systemctl status   caddy
 ```
 
-Watch `cursor.last_block_scanned` advance across successive calls to
-confirm the poller is alive.
+Both units are enabled at boot.
 
-### `GET /actions/types?since_days=<N>`
+## Logs
 
-Action-type histogram over the last N days. Caps: `since_days ∈ [1, 28]`.
+- `logs/serve.log` — ingester poller + uvicorn + /sql audit
+- `logs/backup.log` — nightly cron output
+- `/var/log/caddy/kami-oracle.log` — JSON access log (HTTP path,
+  status, client IP, latency)
+- `sudo journalctl -u kami-oracle -f` — same as serve.log via systemd
+- `sudo journalctl -u caddy -f` — Caddy itself (TLS issuance, etc.)
 
-```bash
-curl -s "http://127.0.0.1:8787/actions/types?since_days=7" | jq .
-```
+## Backups
 
-### `GET /actions/recent?limit=<N>`
+- Bucket: `gs://kami-oracle-backups/`
+- Schedule: cron `15 4 * * *` UTC nightly
+- Path: `gs://kami-oracle-backups/export-<UTC-stamp>.tar.gz`
+- Retention: last 14 objects auto-pruned by the script
+- Hot export: uses `EXPORT DATABASE … (FORMAT PARQUET)` via the
+  loopback `POST /backup` endpoint, so the live ingester is not
+  interrupted.
 
-Most recent decoded actions. Caps: `limit ∈ [1, 2000]`. Returns
-`{count, actions: [...]}`.
+**Currently blocked**: VM service-account scope is
+`devstorage.read_only`, so the upload step 403s. See
+`memory/questions-for-human.md` for the one-time fix (widen scopes).
+Until then the EXPORT runs cleanly but no off-machine copy is made.
 
-```bash
-curl -s "http://127.0.0.1:8787/actions/recent?limit=20" | jq .
-```
-
-### `GET /nodes/top?since_days=<N>&limit=<M>`
-
-Top nodes by `harvest_start` count. Caps: `since_days ∈ [1, 28]`,
-`limit ∈ [1, 200]`.
-
-```bash
-curl -s "http://127.0.0.1:8787/nodes/top?since_days=7&limit=10" | jq .
-```
-
-### `GET /operator/{addr}/summary?since_days=<N>`
-
-All actions by an operator address. `addr` is case-sensitive (checksum
-preferred). Caps: `since_days ∈ [1, 28]`.
+## Token rotation
 
 ```bash
-curl -s "http://127.0.0.1:8787/operator/0x86aDb8f741E945486Ce2B0560D9f643838FAcEC2/summary?since_days=7" | jq .
-```
-
-### `GET /kami/{kami_id}/summary?since_days=<N>`
-
-Per-kami activity summary. `kami_id` is a decimal string. Caps:
-`since_days ∈ [1, 28]`.
-
-```bash
-curl -s "http://127.0.0.1:8787/kami/8985147110719105535652045351219036898186953673538840789086552104591862936658/summary?since_days=7" | jq .
-```
-
-### `GET /kami/{kami_id}/actions?since_days=<N>&limit=<M>`
-
-Per-kami raw action list, newest first. Caps: `since_days ∈ [1, 28]`,
-`limit ∈ [1, 2000]`.
-
-```bash
-curl -s "http://127.0.0.1:8787/kami/<id>/actions?since_days=7&limit=50" | jq .
-```
-
-### `GET /registry/snapshot`
-
-Persisted union of system-contract addresses across the backfill
-window. Shows which systems redeployed (≥2 addresses).
-
-```bash
-curl -s http://127.0.0.1:8787/registry/snapshot | jq '.by_system | to_entries | map(select(.value|length>1))'
+NEW=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+sed -i "s|^KAMI_ORACLE_API_TOKEN=.*|KAMI_ORACLE_API_TOKEN=$NEW|" \
+    ~/kami-oracle/.env
+sudo systemctl restart kami-oracle
+echo "$NEW"  # then update Colab secret + kami-zero config
 ```
 
 ## Known data caveats (as of 2026-04-24)
 
-- **Data window**: Backfill covers 2026-04-12 03:02 UTC through
-  2026-04-22 17:05 UTC (~10.6 days, 420k blocks, 478k actions). The
-  live poller is catching up the ~76k blocks between backfill end and
-  head — `cursor.last_block_scanned` in `/health` tells you where it
-  is. At ~2.35 blocks/s the catchup takes ~9 h. `/actions/recent`
-  queries trail the cursor, not head, until catchup completes.
-
-- **Harvest coverage**: 81.6% of decoded actions are in the harvest
-  family. The session 2.5 bug that made harvest near-invisible is
-  fixed; registry snapshot shows 6 systems with ≥2 addresses, all 4
-  harvest systems among them.
-
-- **Tier-B selector deferred**: 1,137 rows in
-  `memory/unknown-systems.md` for selector `0x09c90324`, against
-  `system.quest.accept` (1134) and `system.account.use.item` (3).
-  These txs are not counted in `kami_action` — they were skipped per
-  the "never guess an ABI" policy. Actual game-level quest_accept /
-  item_use counts will be higher once the selector is confirmed and
-  an overlay lands.
-
-- **Sparse action types**: Many action types appear <10 times in
-  10.6 days (e.g. `friend_accept`, `kami_name`, `account_set_name`,
-  `goal_claim`, `echo_kamis`, `echo_room`). These are genuinely rare
-  on the chain, not decode failures — the validator shows 0 unknown
-  selectors on current-head samples.
-
-- **`kami_static` is empty**. Per-kami trait snapshots were deferred
-  from Stage 1 kickoff — Session 4 candidate.
-
-- **Address case**: operator/addr params should use checksummed
-  casing when possible. The DB stores whatever the chain returned,
-  which is mixed-case checksum.
-
-## Stopping the service cleanly
-
-```bash
-screen -S kami-oracle -X quit
-```
-
-The serve process traps SIGTERM: stop_event → poller drains its
-current chunk → uvicorn stops → DuckDB closes (30 s join timeout).
-`logs/serve.log` records the shutdown sequence.
-
-To restart:
-
-```bash
-cd ~/kami-oracle
-screen -dmS kami-oracle -L -Logfile ~/kami-oracle/logs/serve.log \
-  bash -c 'cd ~/kami-oracle && exec .venv/bin/python -m ingester.serve'
-```
-
-Give it ~30 s to boot (registry probe + uvicorn bind); then
-`curl http://127.0.0.1:8787/health` should reply.
-
-## Security reminder
-
-This API has no auth layer. Do **not** expose it beyond loopback
-without an ADR-gated Phase D decision — the `_parse_bind` guard in
-`ingester/serve.py` refuses any non-loopback bind as a defensive
-backstop, but that's a backstop, not a policy. The correct
-deployment model for public access is still TBD.
+- **Cursor lag**: ingester is ~36 h behind chain head and catching up
+  at ~50 blocks per ~25 s. Queries with `now() - INTERVAL 1 DAY`
+  may return empty until catchup completes; use 7-day windows for
+  meaningful slices today. Watch `cursor.last_block_scanned` on
+  `/health`.
+- **Rolling window**: 7 days. The prune thread sweeps every 3600 s.
+- **`harvest_stop` and `harvest_collect` have NULL `kami_id`**.
+  `harvest_start` populates correctly. Aggregating those types by
+  `kami_id` collapses to one null bucket. Decoder fix is on the
+  Session 6 deferred list.
+- **`kami_static` is empty**. Per-kami trait snapshots not yet
+  backfilled — Session 6 work.
+- **Tier-B selector `0x09c90324`** (~1.1k txs against
+  `system.quest.accept`) is still skipped pending signature
+  confirmation; counts will rise when the overlay lands.
