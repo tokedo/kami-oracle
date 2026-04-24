@@ -6,8 +6,10 @@ DuckDB holds a per-process exclusive file lock, which rules out the
 naive "just open another read-only connection from a separate process"
 approach — hence the co-hosted design.
 
-Bound to ``127.0.0.1`` by default. Exposure to the network is a Phase-D
-decision and requires an auth layer; do NOT bind to 0.0.0.0 from here.
+Auth: every route except ``/health`` is gated by a bearer token. When
+``api_token`` is None, ``build_app`` refuses to start if the caller
+requested a non-loopback bind; on a loopback bind with no token the
+auth dependency is a no-op (dev-only convenience).
 
 Endpoints return JSON. ``uint256`` values (kami_id, amount) are
 serialized as decimal strings to stay safe for JS consumers.
@@ -17,9 +19,10 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
 
 from .storage import Storage
 from .system_registry import SystemRegistry
@@ -33,6 +36,12 @@ log = logging.getLogger(__name__)
 MAX_SINCE_DAYS = 28
 # Hard row cap across every endpoint that returns action rows.
 MAX_LIMIT = 2000
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", ""})
+
+
+def _is_loopback(host: str) -> bool:
+    return host in _LOOPBACK_HOSTS
 
 
 def _action_row_to_dict(row: tuple) -> dict[str, Any]:
@@ -89,19 +98,46 @@ def _clamp_limit(v: int, default: int) -> int:
     return v
 
 
-def build_app(storage: Storage, registry: SystemRegistry | None = None) -> FastAPI:
+def build_app(
+    storage: Storage,
+    registry: SystemRegistry | None = None,
+    *,
+    api_token: str | None = None,
+    bind_host: str = "127.0.0.1",
+) -> FastAPI:
     """Build the FastAPI app bound to a specific ``Storage`` instance.
 
     The storage reference is captured in closures rather than pulled from
     a module global so tests can build an app against a scratch DuckDB
     without touching the real one.
+
+    If ``api_token`` is None and ``bind_host`` is not a loopback host,
+    this raises at startup — refusing to silently serve unauth'd over
+    the network.
     """
+    if api_token is None and not _is_loopback(bind_host):
+        raise RuntimeError(
+            f"refusing to build API without a token while bound to "
+            f"non-loopback host {bind_host!r}. Set KAMI_ORACLE_API_TOKEN."
+        )
+
     app = FastAPI(
         title="kami-oracle",
         description="Read-only query layer over the Kamigotchi action DB (Stage 1).",
         version="0.1.0",
     )
 
+    async def require_token(authorization: str | None = Header(default=None)) -> None:
+        if api_token is None:
+            return
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="missing bearer token")
+        supplied = authorization[len("Bearer "):].strip()
+        if not secrets.compare_digest(supplied.encode("utf-8"), api_token.encode("utf-8")):
+            raise HTTPException(status_code=401, detail="invalid bearer token")
+
+    # /health is the only unauth'd route — kept open so uptime probes and
+    # the systemd healthcheck don't need a token.
     @app.get("/health")
     def health() -> dict[str, Any]:
         cursor = storage.get_cursor_state()
@@ -124,7 +160,9 @@ def build_app(storage: Storage, registry: SystemRegistry | None = None) -> FastA
             }
         return payload
 
-    @app.get("/kami/{kami_id}/actions")
+    protected = APIRouter(dependencies=[Depends(require_token)])
+
+    @protected.get("/kami/{kami_id}/actions")
     def kami_actions(
         kami_id: str,
         since_days: int = Query(7, ge=1, le=MAX_SINCE_DAYS),
@@ -146,7 +184,7 @@ def build_app(storage: Storage, registry: SystemRegistry | None = None) -> FastA
             "actions": [_action_row_to_dict(r) for r in rows],
         }
 
-    @app.get("/kami/{kami_id}/summary")
+    @protected.get("/kami/{kami_id}/summary")
     def kami_summary(
         kami_id: str,
         since_days: int = Query(28, ge=1, le=MAX_SINCE_DAYS),
@@ -176,7 +214,7 @@ def build_app(storage: Storage, registry: SystemRegistry | None = None) -> FastA
             "by_type": [{"action_type": r[0], "count": int(r[1])} for r in by_type],
         }
 
-    @app.get("/operator/{addr}/summary")
+    @protected.get("/operator/{addr}/summary")
     def operator_summary(
         addr: str,
         since_days: int = Query(28, ge=1, le=MAX_SINCE_DAYS),
@@ -208,7 +246,7 @@ def build_app(storage: Storage, registry: SystemRegistry | None = None) -> FastA
             "by_type": [{"action_type": r[0], "count": int(r[1])} for r in by_type],
         }
 
-    @app.get("/actions/types")
+    @protected.get("/actions/types")
     def action_types(
         since_days: int = Query(28, ge=1, le=MAX_SINCE_DAYS),
     ) -> dict[str, Any]:
@@ -234,7 +272,7 @@ def build_app(storage: Storage, registry: SystemRegistry | None = None) -> FastA
             ],
         }
 
-    @app.get("/nodes/top")
+    @protected.get("/nodes/top")
     def top_nodes(
         since_days: int = Query(28, ge=1, le=MAX_SINCE_DAYS),
         limit: int = Query(20, ge=1, le=200),
@@ -255,7 +293,7 @@ def build_app(storage: Storage, registry: SystemRegistry | None = None) -> FastA
             "nodes": [{"node_id": r[0], "harvest_starts": int(r[1])} for r in rows],
         }
 
-    @app.get("/actions/recent")
+    @protected.get("/actions/recent")
     def recent_actions(
         limit: int = Query(100, ge=1, le=MAX_LIMIT),
     ) -> dict[str, Any]:
@@ -269,7 +307,7 @@ def build_app(storage: Storage, registry: SystemRegistry | None = None) -> FastA
             "actions": [_action_row_to_dict(r) for r in rows],
         }
 
-    @app.get("/registry/snapshot")
+    @protected.get("/registry/snapshot")
     def registry_snapshot() -> dict[str, Any]:
         rows = storage.fetchall(
             "SELECT system_id, address, abi_name, first_seen_block, last_seen_block "
@@ -289,8 +327,13 @@ def build_app(storage: Storage, registry: SystemRegistry | None = None) -> FastA
             "by_system": by_system,
         }
 
+    app.include_router(protected)
+
     @app.exception_handler(Exception)
     async def _generic_error(_request, exc):
+        # HTTPExceptions already have a proper status; let them through.
+        if isinstance(exc, HTTPException):
+            raise exc
         log.exception("api: unhandled error: %s", exc)
         raise HTTPException(status_code=500, detail="internal server error")
 

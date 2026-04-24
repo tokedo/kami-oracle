@@ -50,16 +50,33 @@ UNKNOWN_LOG = REPO_ROOT / "memory" / "unknown-systems.md"
 DEFAULT_BIND = "127.0.0.1:8787"
 MAX_CATCHUP = 50
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
-def _parse_bind(bind: str) -> tuple[str, int]:
+
+def _parse_bind(bind: str, *, allow_nonloopback: bool, has_token: bool) -> tuple[str, int]:
+    """Parse KAMI_ORACLE_API_BIND into (host, port).
+
+    Non-loopback binds are opt-in: caller must set
+    KAMI_ORACLE_ALLOW_NONLOOPBACK=1 AND KAMI_ORACLE_API_TOKEN before
+    we'll accept a bind that isn't 127.0.0.1 / localhost / ::1.
+    """
     host, port = bind.rsplit(":", 1)
-    # Guard against bind-all misconfigurations. There's no auth layer on
-    # the HTTP endpoints yet; exposure decision is Phase D + ADR.
-    if host in ("0.0.0.0", "", "*", "::"):
+    if host in _LOOPBACK_HOSTS:
+        return host, int(port)
+    if host in ("", "*"):
         raise ValueError(
-            f"refusing to bind API to {host!r}; must be a loopback-only host "
-            "(set KAMI_ORACLE_API_BIND=127.0.0.1:PORT). Public exposure is "
-            "gated on a Phase-D auth layer."
+            f"KAMI_ORACLE_API_BIND host is empty or wildcard ({host!r})"
+        )
+    if not allow_nonloopback:
+        raise ValueError(
+            f"refusing to bind API to non-loopback host {host!r}. Set "
+            "KAMI_ORACLE_ALLOW_NONLOOPBACK=1 (and KAMI_ORACLE_API_TOKEN) "
+            "to opt in."
+        )
+    if not has_token:
+        raise ValueError(
+            f"refusing to bind API to non-loopback host {host!r} without a "
+            "token. Set KAMI_ORACLE_API_TOKEN."
         )
     return host, int(port)
 
@@ -168,7 +185,17 @@ def main() -> int:
     configure_logging(cfg.log_level)
 
     bind = os.environ.get("KAMI_ORACLE_API_BIND", DEFAULT_BIND)
-    host, port = _parse_bind(bind)
+    allow_nonloopback = os.environ.get("KAMI_ORACLE_ALLOW_NONLOOPBACK", "").strip() == "1"
+    host, port = _parse_bind(
+        bind,
+        allow_nonloopback=allow_nonloopback,
+        has_token=cfg.api_token is not None,
+    )
+    if host not in _LOOPBACK_HOSTS:
+        log.warning(
+            "serve: API listening on %s:%d — auth required (non-loopback bind)",
+            host, port,
+        )
 
     client = ChainClient(cfg.rpc_url)
     if not client.is_connected():
@@ -212,7 +239,12 @@ def main() -> int:
     )
     poller_thread.start()
 
-    app = build_app(storage, registry)
+    app = build_app(
+        storage,
+        registry,
+        api_token=cfg.api_token,
+        bind_host=host,
+    )
 
     # Build uvicorn server manually so we can drive a graceful shutdown
     # ourselves when the poller signals (and vice versa).

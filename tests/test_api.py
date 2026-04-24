@@ -17,6 +17,8 @@ from ingester.decoder import DecodedAction
 from ingester.storage import RawTx, Storage, read_schema_sql
 from ingester.system_registry import SystemInfo, SystemRegistry
 
+TEST_TOKEN = "test-token-abc-123"
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -220,3 +222,61 @@ def test_limit_is_bounded(client):
     # limit above MAX_LIMIT is rejected by the validator.
     r = client.get("/actions/recent", params={"limit": 10_000})
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Bearer-token auth.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def auth_client(tmp_path):
+    """Same scratch DB as ``client`` but with an auth token configured."""
+    storage = Storage(tmp_path / "scratch.duckdb")
+    storage.bootstrap(read_schema_sql(ROOT))
+    storage.set_cursor(block_number=27_800_000, block_timestamp=_now_unix(), vendor_sha="testsha")
+    now = _now_unix()
+    storage.upsert_raw_txs([_raw_tx("0xaa" + "0" * 62, now - 3600)])
+    storage.upsert_actions([
+        _action("0xaa" + "0" * 62, 0, kami_id="42", action_type="harvest_start",
+                block_ts=now - 3600, node_id="47"),
+    ])
+    registry = SystemRegistry.from_snapshot_rows(storage.load_system_address_snapshot())
+    app = build_app(storage, registry, api_token=TEST_TOKEN, bind_host="127.0.0.1")
+    with TestClient(app) as tc:
+        yield tc
+    storage.close()
+
+
+def test_health_is_unauth_even_with_token(auth_client):
+    r = auth_client.get("/health")
+    assert r.status_code == 200
+
+
+def test_protected_route_without_token(auth_client):
+    r = auth_client.get("/actions/types")
+    assert r.status_code == 401
+
+
+def test_protected_route_with_wrong_token(auth_client):
+    r = auth_client.get(
+        "/actions/types",
+        headers={"Authorization": "Bearer wrong-token"},
+    )
+    assert r.status_code == 401
+
+
+def test_protected_route_with_correct_token(auth_client):
+    r = auth_client.get(
+        "/actions/types",
+        headers={"Authorization": f"Bearer {TEST_TOKEN}"},
+    )
+    assert r.status_code == 200
+
+
+def test_build_app_raises_on_nonloopback_without_token(tmp_path):
+    storage = Storage(tmp_path / "scratch.duckdb")
+    storage.bootstrap(read_schema_sql(ROOT))
+    with pytest.raises(RuntimeError, match="non-loopback"):
+        build_app(storage, None, api_token=None, bind_host="0.0.0.0")
+    storage.close()
