@@ -259,20 +259,32 @@ class Storage:
     # ------------------------------------------------------------------
 
     def prune_older_than(self, cutoff_ts: int) -> tuple[int, int]:
+        """Delete kami_action and raw_tx rows with block_timestamp < cutoff.
+
+        Returns ``(kami_action_deleted, raw_tx_deleted)``. Wrapped in a
+        single transaction so a crash mid-prune can't leave one table
+        stale against the other.
+        """
         cutoff = _ts(cutoff_ts)
         with self.lock:
-            n_actions = self.conn.execute(
-                "SELECT COUNT(*) FROM kami_action WHERE block_timestamp < ?", [cutoff]
-            ).fetchone()[0]
-            self.conn.execute(
-                "DELETE FROM kami_action WHERE block_timestamp < ?", [cutoff]
-            )
-            n_raw = self.conn.execute(
-                "SELECT COUNT(*) FROM raw_tx WHERE block_timestamp < ?", [cutoff]
-            ).fetchone()[0]
-            self.conn.execute(
-                "DELETE FROM raw_tx WHERE block_timestamp < ?", [cutoff]
-            )
+            self.conn.execute("BEGIN TRANSACTION")
+            try:
+                n_actions = self.conn.execute(
+                    "SELECT COUNT(*) FROM kami_action WHERE block_timestamp < ?", [cutoff]
+                ).fetchone()[0]
+                self.conn.execute(
+                    "DELETE FROM kami_action WHERE block_timestamp < ?", [cutoff]
+                )
+                n_raw = self.conn.execute(
+                    "SELECT COUNT(*) FROM raw_tx WHERE block_timestamp < ?", [cutoff]
+                ).fetchone()[0]
+                self.conn.execute(
+                    "DELETE FROM raw_tx WHERE block_timestamp < ?", [cutoff]
+                )
+                self.conn.execute("COMMIT")
+            except Exception:
+                self.conn.execute("ROLLBACK")
+                raise
         return int(n_actions), int(n_raw)
 
     # ------------------------------------------------------------------

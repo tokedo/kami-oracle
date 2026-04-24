@@ -12,18 +12,29 @@ Threading layout:
 * A daemon thread runs the poller loop, which is a thin refactor of
   ``ingester.poller`` around the ``process_block_range`` core so the
   ingest logic itself stays single-sourced.
+* A daemon thread runs the prune loop, which wakes every
+  ``cfg.prune_interval_s`` seconds and drops rows older than
+  ``cfg.window_days`` via ``Storage.prune_older_than``.
+
+Concurrency: all three consumers (poller, prune, API) share one
+DuckDB connection. DuckDB's own internal lock serializes writes on
+a single connection; ``Storage.lock`` additionally serializes each
+method call, which is what every caller in this process relies on.
 
 Graceful shutdown: the main thread's signal handler flips
-``stop_event`` (read by the poller each iteration) and then tells
-uvicorn to stop; uvicorn drains in-flight HTTP requests, after which
-we join the poller and close the DB.
+``stop_event`` (read by the poller and prune loops each iteration)
+and then tells uvicorn to stop; uvicorn drains in-flight HTTP
+requests, after which we join the background threads and close the
+DB.
 
 HTTP bind: ``KAMI_ORACLE_API_BIND`` (default ``127.0.0.1:8787``).
-Do NOT bind to a public interface — there's no auth layer yet.
+Binding to a non-loopback host requires both KAMI_ORACLE_API_TOKEN
+and KAMI_ORACLE_ALLOW_NONLOOPBACK=1 — see ``_parse_bind`` below.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import os
 import signal
@@ -180,6 +191,42 @@ def _poller_loop(
     log.info("serve/poller: stop_event set; exiting poller loop")
 
 
+def _prune_loop(
+    *,
+    storage: Storage,
+    cfg,
+    stop_event: threading.Event,
+) -> None:
+    """Periodically prune rows outside the configured retention window.
+
+    Wakes every ``cfg.prune_interval_s`` seconds, computes a cutoff
+    of ``now - cfg.window_days``, and calls ``prune_older_than``.
+    Exceptions are caught and logged — the loop never dies, so a
+    transient DB hiccup can't disable pruning until the next process
+    restart.
+    """
+    log.info(
+        "serve/prune: starting — interval=%.0fs, window=%d days",
+        cfg.prune_interval_s, cfg.window_days,
+    )
+    while not stop_event.is_set():
+        if stop_event.wait(cfg.prune_interval_s):
+            break
+        try:
+            cutoff_dt = dt.datetime.now(tz=dt.timezone.utc) - dt.timedelta(days=cfg.window_days)
+            cutoff_ts = int(cutoff_dt.timestamp())
+            n_actions, n_raw = storage.prune_older_than(cutoff_ts)
+            log.info(
+                "serve/prune: deleted %d kami_action, %d raw_tx, cutoff=%s",
+                n_actions, n_raw, cutoff_dt.isoformat(),
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("serve/prune: sweep failed, retrying in 60s: %s", e)
+            if stop_event.wait(60):
+                break
+    log.info("serve/prune: stop_event set; exiting prune loop")
+
+
 def main() -> int:
     cfg = load_config()
     configure_logging(cfg.log_level)
@@ -239,6 +286,14 @@ def main() -> int:
     )
     poller_thread.start()
 
+    prune_thread = threading.Thread(
+        target=_prune_loop,
+        kwargs=dict(storage=storage, cfg=cfg, stop_event=stop_event),
+        name="kami-prune",
+        daemon=True,
+    )
+    prune_thread.start()
+
     app = build_app(
         storage,
         registry,
@@ -275,6 +330,9 @@ def main() -> int:
         poller_thread.join(timeout=30)
         if poller_thread.is_alive():
             log.warning("serve: poller thread did not exit within 30s")
+        prune_thread.join(timeout=5)
+        if prune_thread.is_alive():
+            log.warning("serve: prune thread did not exit within 5s")
         try:
             storage.close()
         except Exception as e:  # noqa: BLE001
