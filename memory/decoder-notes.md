@@ -551,3 +551,56 @@ by pulling the kami_id from a different calldata slot.
 survives crashes (systemd Restart=always) and VM reboots (enabled).
 7-day window now self-prunes via the daemon thread at 3600s cadence.
 
+
+## Session 5 public plane smoke test (2026-04-24)
+
+End-to-end test against `https://136-112-224-147.sslip.io` from the
+oracle VM after Caddy + middleware + bind switch went live.
+
+### TLS
+```
+$ curl -sv https://136-112-224-147.sslip.io/health 2>&1 | grep -E "subject:|issuer:|HTTP/"
+*  subject: CN=136-112-224-147.sslip.io
+*  issuer: C=US; O=Let's Encrypt; CN=E8
+< HTTP/2 200
+```
+Cert is HTTP-01-issued by Let's Encrypt E8, valid through Jul 23 2026.
+HTTP/2, TLSv1.3.
+
+### Auth'd /health (over HTTPS)
+Returned 200 with full cursor / row-count / registry payload.
+
+### /sql over HTTPS, 7-day action histogram
+Returned 10 rows (harvest_stop=104,057; harvest_start=80,871;
+feed=20,505; skill_upgrade=6,059; lvlup=5,303; item_craft=4,484;
+move=3,765; harvest_collect=3,502; harvest_liquidate=1,308;
+droptable_reveal=453). Latency 90 ms.
+The 1-day window came back empty — expected, the cursor is ~36h
+behind chain head and `now() - INTERVAL 1 DAY` is past the latest
+ingested timestamp. Backlog is being eaten at ~50 blocks per ~25s.
+
+### Rate limit (60/min)
+65 requests in a tight loop:
+  58 × 200, then 7 × 429
+Window started at count=2 from two earlier /sql calls in the same
+minute, so the 60-cap kicks in 2 requests sooner. Confirms the
+counter is shared across endpoints per token, which is what we want.
+429 response body: `{"error":"rate_limited","detail":"limit 60/min
+exceeded"}`, with a `Retry-After` header.
+
+### Path validation on /backup
+Posting `dest_dir=/tmp/oracle-backup-test` returned 400 with body
+`{"detail":"dest_dir must be inside /home/anatolyzaytsev/kami-oracle/db"}`.
+Loopback gating not externally testable from the VM (loopback IS the
+peer); the check is exercised in tests indirectly via client_ip.
+
+### Backup script run
+Manual `./scripts/backup-db.sh`: EXPORT step succeeded (1.9s, 67MB
+parquet tarball). gcloud storage cp failed with HTTP 403 "Provided
+scope(s) are not authorized" — VM SA scope is devstorage.read_only.
+Question logged in memory/questions-for-human.md asking the founder
+to widen scope.
+
+**Status**: public plane is live, authenticated, rate-limited, with
+nightly backup wired but blocked on SA scope. Founder can run the
+Colab starter notebook once the token is in Colab secrets.
