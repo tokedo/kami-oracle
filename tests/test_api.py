@@ -280,3 +280,40 @@ def test_build_app_raises_on_nonloopback_without_token(tmp_path):
     with pytest.raises(RuntimeError, match="non-loopback"):
         build_app(storage, None, api_token=None, bind_host="0.0.0.0")
     storage.close()
+
+
+def _fake_request(peer: str, headers: dict[str, str] | None = None):
+    from starlette.requests import Request
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/",
+        "headers": [
+            (k.lower().encode("ascii"), v.encode("ascii"))
+            for k, v in (headers or {}).items()
+        ],
+        "client": (peer, 0) if peer else None,
+    }
+    return Request(scope)
+
+
+def test_client_ip_trusts_x_real_ip_from_loopback():
+    from ingester.api import client_ip
+
+    req = _fake_request("127.0.0.1", {"X-Real-IP": "203.0.113.7"})
+    assert client_ip(req) == "203.0.113.7"
+
+
+def test_client_ip_ignores_x_real_ip_from_non_loopback():
+    from ingester.api import client_ip
+
+    req = _fake_request("198.51.100.10", {"X-Real-IP": "203.0.113.7"})
+    assert client_ip(req) == "198.51.100.10"
+
+
+def test_client_ip_falls_back_to_peer_when_no_header():
+    from ingester.api import client_ip
+
+    req = _fake_request("127.0.0.1")
+    assert client_ip(req) == "127.0.0.1"

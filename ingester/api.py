@@ -59,6 +59,21 @@ def _is_loopback(host: str) -> bool:
     return host in _LOOPBACK_HOSTS
 
 
+def client_ip(request: Request) -> str:
+    """Resolve the real client IP, trusting X-Real-IP only from loopback.
+
+    Caddy terminates TLS on :443 and proxies to 127.0.0.1:8787, setting
+    X-Real-IP to the original remote. Trusting that header from any other
+    peer would let a non-loopback caller spoof their IP.
+    """
+    peer = request.client.host if request.client else ""
+    if _is_loopback(peer):
+        forwarded = request.headers.get("X-Real-IP")
+        if forwarded:
+            return forwarded
+    return peer or "?"
+
+
 def _action_row_to_dict(row: tuple) -> dict[str, Any]:
     (
         id_, tx_hash, sub_index, block_number, block_timestamp,
@@ -349,7 +364,7 @@ def build_app(
 
     @protected.post("/sql")
     def sql_query(req: SqlRequest, request: Request) -> dict[str, Any]:
-        client_ip = request.client.host if request.client else "?"
+        caller = client_ip(request)
         preview = req.q[:500].replace("\n", " ")
         t0 = time.monotonic()
         try:
@@ -357,7 +372,7 @@ def build_app(
         except SqlValidationError as e:
             log.info(
                 "sql: status=validation client=%s latency_ms=%d q=%r detail=%s",
-                client_ip, int((time.monotonic() - t0) * 1000), preview, str(e),
+                caller, int((time.monotonic() - t0) * 1000), preview, str(e),
             )
             raise HTTPException(
                 status_code=400,
@@ -370,7 +385,7 @@ def build_app(
         except SqlTimeoutError as e:
             log.info(
                 "sql: status=timeout client=%s latency_ms=%d q=%r",
-                client_ip, int((time.monotonic() - t0) * 1000), preview,
+                caller, int((time.monotonic() - t0) * 1000), preview,
             )
             raise HTTPException(
                 status_code=504,
@@ -379,7 +394,7 @@ def build_app(
         except SqlExecutionError as e:
             log.info(
                 "sql: status=execution client=%s latency_ms=%d q=%r detail=%s",
-                client_ip, int((time.monotonic() - t0) * 1000), preview, str(e),
+                caller, int((time.monotonic() - t0) * 1000), preview, str(e),
             )
             raise HTTPException(
                 status_code=400,
@@ -387,7 +402,7 @@ def build_app(
             )
         log.info(
             "sql: status=ok client=%s rows=%d truncated=%s latency_ms=%d q=%r",
-            client_ip, result.row_count, result.truncated, result.latency_ms, preview,
+            caller, result.row_count, result.truncated, result.latency_ms, preview,
         )
         return {
             "columns": result.columns,
