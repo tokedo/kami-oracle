@@ -299,6 +299,15 @@ class Storage:
         with self.lock:
             return self.conn.execute(sql, params or []).fetchone()
 
+    def execute(self, sql: str, params: list[Any] | None = None) -> None:
+        """Run a statement that returns no rows (e.g. EXPORT DATABASE).
+
+        Held inside ``self.lock`` like every other write so concurrent
+        ingest writes don't race the admin call.
+        """
+        with self.lock:
+            self.conn.execute(sql, params or [])
+
 
 def _ts(unix_s: int) -> dt.datetime:
     return dt.datetime.fromtimestamp(int(unix_s), tz=dt.timezone.utc)

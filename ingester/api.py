@@ -21,6 +21,7 @@ import json
 import logging
 import secrets
 import time
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
@@ -132,6 +133,15 @@ def _clamp_limit(v: int, default: int) -> int:
 class SqlRequest(BaseModel):
     q: str = Field(..., min_length=1)
     limit: int = Field(default=SQL_DEFAULT_LIMIT, ge=1, le=SQL_MAX_LIMIT)
+
+
+class BackupRequest(BaseModel):
+    dest_dir: str = Field(..., min_length=1)
+
+
+# Backup writes are restricted to this prefix. Resolved at module load
+# so symlink/`..` games can't escape it at request time.
+_BACKUP_PARENT = (Path(__file__).resolve().parent.parent / "db").resolve()
 
 
 def build_app(
@@ -416,6 +426,41 @@ def build_app(
             "truncated": result.truncated,
             "latency_ms": result.latency_ms,
         }
+
+    @protected.post("/backup")
+    def backup(req: BackupRequest, request: Request) -> dict[str, Any]:
+        # Loopback-only: rejects anything that didn't come straight from
+        # the host (i.e. nightly cron). The bearer token still gates
+        # this on top of the IP check.
+        caller = client_ip(request)
+        if caller != "127.0.0.1":
+            raise HTTPException(status_code=403, detail="loopback only")
+
+        dest = Path(req.dest_dir)
+        if not dest.is_absolute():
+            raise HTTPException(status_code=400, detail="dest_dir must be absolute")
+        try:
+            resolved = dest.resolve()
+        except OSError as e:
+            raise HTTPException(status_code=400, detail=f"cannot resolve dest: {e}") from e
+        try:
+            resolved.relative_to(_BACKUP_PARENT)
+        except ValueError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"dest_dir must be inside {_BACKUP_PARENT}",
+            ) from e
+
+        dest_str = str(resolved).replace("'", "''")
+        t0 = time.monotonic()
+        try:
+            storage.execute(f"EXPORT DATABASE '{dest_str}' (FORMAT PARQUET)")
+        except Exception as e:  # noqa: BLE001
+            log.exception("backup: EXPORT DATABASE failed: %s", e)
+            raise HTTPException(status_code=500, detail=f"export failed: {e}") from e
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        log.info("backup: exported to %s in %dms", resolved, latency_ms)
+        return {"ok": True, "dest_dir": str(resolved), "latency_ms": latency_ms}
 
     app.include_router(protected)
 
