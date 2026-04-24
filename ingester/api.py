@@ -20,10 +20,19 @@ from __future__ import annotations
 import json
 import logging
 import secrets
+import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 
+from .sql import (
+    SqlExecutionError,
+    SqlTimeoutError,
+    SqlValidationError,
+    run_readonly,
+    validate_readonly_sql,
+)
 from .storage import Storage
 from .system_registry import SystemRegistry
 
@@ -36,6 +45,12 @@ log = logging.getLogger(__name__)
 MAX_SINCE_DAYS = 28
 # Hard row cap across every endpoint that returns action rows.
 MAX_LIMIT = 2000
+
+# /sql bounds. The row cap is a separate, higher ceiling than MAX_LIMIT
+# — ad-hoc queries need more headroom than the fixed-shape endpoints.
+SQL_DEFAULT_LIMIT = 1000
+SQL_MAX_LIMIT = 10_000
+SQL_TIMEOUT_S = 10.0
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", ""})
 
@@ -96,6 +111,11 @@ def _clamp_limit(v: int, default: int) -> int:
     if v > MAX_LIMIT:
         return MAX_LIMIT
     return v
+
+
+class SqlRequest(BaseModel):
+    q: str = Field(..., min_length=1)
+    limit: int = Field(default=SQL_DEFAULT_LIMIT, ge=1, le=SQL_MAX_LIMIT)
 
 
 def build_app(
@@ -325,6 +345,56 @@ def build_app(
             "n_systems": len(by_system),
             "n_addresses": len(rows),
             "by_system": by_system,
+        }
+
+    @protected.post("/sql")
+    def sql_query(req: SqlRequest, request: Request) -> dict[str, Any]:
+        client_ip = request.client.host if request.client else "?"
+        preview = req.q[:500].replace("\n", " ")
+        t0 = time.monotonic()
+        try:
+            cleaned = validate_readonly_sql(req.q)
+        except SqlValidationError as e:
+            log.info(
+                "sql: status=validation client=%s latency_ms=%d q=%r detail=%s",
+                client_ip, int((time.monotonic() - t0) * 1000), preview, str(e),
+            )
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "validation", "detail": str(e)},
+            )
+        try:
+            result = run_readonly(
+                storage, cleaned, row_cap=req.limit, timeout_s=SQL_TIMEOUT_S,
+            )
+        except SqlTimeoutError as e:
+            log.info(
+                "sql: status=timeout client=%s latency_ms=%d q=%r",
+                client_ip, int((time.monotonic() - t0) * 1000), preview,
+            )
+            raise HTTPException(
+                status_code=504,
+                detail={"error": "timeout", "detail": str(e)},
+            )
+        except SqlExecutionError as e:
+            log.info(
+                "sql: status=execution client=%s latency_ms=%d q=%r detail=%s",
+                client_ip, int((time.monotonic() - t0) * 1000), preview, str(e),
+            )
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "execution", "detail": str(e)},
+            )
+        log.info(
+            "sql: status=ok client=%s rows=%d truncated=%s latency_ms=%d q=%r",
+            client_ip, result.row_count, result.truncated, result.latency_ms, preview,
+        )
+        return {
+            "columns": result.columns,
+            "rows": result.rows,
+            "row_count": result.row_count,
+            "truncated": result.truncated,
+            "latency_ms": result.latency_ms,
         }
 
     app.include_router(protected)
