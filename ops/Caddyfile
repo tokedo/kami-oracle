@@ -1,0 +1,34 @@
+# kami-oracle public endpoint — Phase D
+# Canonical Caddyfile for the public HTTPS plane. Authorized 2026-04-24.
+#
+# Install on the oracle VM:
+#   ORACLE_HOST=<ip-with-dashes>.sslip.io  # e.g. 136-112-224-147.sslip.io
+#   sudo sed "s/<ORACLE_HOST>/$ORACLE_HOST/" ops/Caddyfile \
+#       | sudo tee /etc/caddy/Caddyfile > /dev/null
+#   sudo caddy validate --config /etc/caddy/Caddyfile
+#   sudo systemctl reload caddy
+
+<ORACLE_HOST> {
+    # Let's Encrypt HTTP-01 challenge uses :80; Caddy handles both.
+    encode zstd gzip
+
+    # Hide Caddy / server info
+    header {
+        -Server
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+    }
+
+    # Reverse proxy to the loopback FastAPI
+    reverse_proxy 127.0.0.1:8787 {
+        # Pass client IP for rate-limit middleware
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+    }
+
+    log {
+        output file /var/log/caddy/kami-oracle.log
+        format json
+    }
+}
