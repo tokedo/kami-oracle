@@ -433,3 +433,62 @@ past the DB's max since backfill ended 2 days ago):
 the selector itself is not in the vendored ABI. Tier-B overlay
 candidate pending upstream signature confirmation.
 
+
+## Session 3.5 serve launch health check (2026-04-24 21:02 UTC)
+
+Co-hosted `ingester.serve` launched via screen `kami-oracle`. Bound
+to `127.0.0.1:8787`. Poller thread scanning forward from backfill
+end (27,970,125) toward head (~28,046,946, ~76k-block catchup).
+
+**Cursor advance** — sampled `/health.cursor.last_block_scanned`
+every 30 s for 10 min:
+
+- T0 (before window): 27,970,253
+- t=30 s:  27,970,335  (+82)
+- t=60 s:  27,970,408  (+73)
+- t=300 s: 27,970,978  (+570 from t=30, avg 2.34 blk/s)
+- t=600 s: 27,971,692  (+1,357 from t=30, avg 2.38 blk/s)
+
+Total advance from T0 to t=600: **1,439 blocks in 603 s = 2.39
+blocks/s**, matching the single-threaded backfill throughput. No
+stalls, no regressions.
+
+**Endpoint smoke + latencies** (`time curl`, localhost):
+
+| endpoint                                      | status | latency |
+|-----------------------------------------------|--------|---------|
+| `/health`                                     | 200    |   62 ms |
+| `/actions/types?since_days=7`                 | 200    |  115 ms |
+| `/actions/recent?limit=5`                     | 200    |   40 ms |
+| `/nodes/top?since_days=7&limit=10`            | 200    |  132 ms |
+| `/operator/{bpeon}/summary?since_days=7`      | 200    |   73 ms |
+| `/kami/{id}/summary?since_days=7`             | 200    |   93 ms |
+| `/kami/{id}/actions?since_days=7&limit=10`    | 200    |  152 ms |
+| `/registry/snapshot`                          | 200    |   43 ms |
+
+**Bounds-cap validation** — `MAX_SINCE_DAYS=28`, `MAX_LIMIT=2000`
+in `ingester/api.py`:
+
+| request                                   | expected | actual |
+|-------------------------------------------|----------|--------|
+| `/actions/recent?limit=5000`              | 422      | 422 ✓  |
+| `/actions/types?since_days=999`           | 422      | 422 ✓  |
+| `/actions/recent?limit=2000` (at cap)     | 200      | 200 ✓  |
+| `/actions/types?since_days=28` (at cap)   | 200      | 200 ✓  |
+
+**Sample payloads**
+
+- `/actions/types?since_days=7` returned 22 distinct action_types,
+  total 214,033, harvest share ~82% — consistent with the backfill
+  summary above.
+- `/nodes/top?since_days=7&limit=10` top node is `86` with 27,688
+  harvest_starts, then 16/18/9/53/35/73/65/72/75.
+- bpeon (`0x86aDb8…cEC2`) 7-day summary: 321 total actions, 20
+  distinct kami, 162 harvest_stop, 103 harvest_start, 34 move, 8
+  scavenge_claim, 7 droptable_reveal, 6 quest_complete, 1 feed.
+- `/registry/snapshot`: 34 systems, 40 addresses — matches
+  `system_address_snapshot` row count.
+
+**Status: serve launch successful**, founder-testing guide published
+at `memory/founder-testing.md`.
+
