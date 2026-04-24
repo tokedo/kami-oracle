@@ -23,6 +23,8 @@ class Config:
     window_days: int
     poll_interval_s: float
     log_level: str
+    api_token: str | None
+    prune_interval_s: float
 
     @property
     def world_address(self) -> str:
@@ -49,12 +51,17 @@ def load_config() -> Config:
     if not db_path.is_absolute():
         db_path = REPO_ROOT / db_path
 
+    api_token_raw = os.environ.get("KAMI_ORACLE_API_TOKEN", "").strip()
+    api_token = api_token_raw or None
+
     return Config(
         rpc_url=rpc_url,
         db_path=db_path,
         window_days=int(os.environ.get("KAMI_ORACLE_WINDOW_DAYS", "7")),
         poll_interval_s=float(os.environ.get("KAMI_ORACLE_POLL_INTERVAL_S", "3")),
         log_level=os.environ.get("KAMI_ORACLE_LOG_LEVEL", "INFO").upper(),
+        api_token=api_token,
+        prune_interval_s=float(os.environ.get("KAMI_ORACLE_PRUNE_INTERVAL_S", "3600")),
     )
 
 
