@@ -1,0 +1,22 @@
+[Unit]
+Description=kami-oracle ingester + serve
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=anatolyzaytsev
+Group=anatolyzaytsev
+WorkingDirectory=/home/anatolyzaytsev/kami-oracle
+EnvironmentFile=/home/anatolyzaytsev/kami-oracle/.env
+ExecStart=/home/anatolyzaytsev/kami-oracle/.venv/bin/python -m ingester.serve
+StandardOutput=append:/home/anatolyzaytsev/kami-oracle/logs/serve.log
+StandardError=append:/home/anatolyzaytsev/kami-oracle/logs/serve.log
+Restart=always
+RestartSec=5
+# Let the process drain DB cleanly on stop.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
