@@ -1,134 +1,92 @@
 # Next Steps
 
-## Session 3.5 — pick up from here
+## Session 4 — pick up from here
 
-### Current state at session 3 end (2026-04-22 ~17:15 UTC)
+### Current state at session 3.5 end (2026-04-24 21:xx UTC)
 
-- Session 3 shipped Parts 0–2 of the brief: registry-snapshot fix
-  (Part 0 / prime), backfill relaunch (Part 1), and co-hosted FastAPI
-  read-only query layer (Part 2). See `memory/improvements.md` for
-  commit hashes.
-- **1-week backfill is running** in detached screen session
-  `kami-backfill`. Relaunched 2026-04-22 17:05 UTC after the
-  registry-snapshot fix landed. 935 chunks done, 0 resume events at
-  session 3 end. Projected ~2 days at 2.4 blocks/sec. Log at
-  `logs/backfill.log`.
-- DB file: `db/kami-oracle.duckdb` (fresh, bootstrapped by the
-  backfill launch). Session-2 DB backed up at
-  `db/kami-oracle.duckdb.session2.bak` and session-2.5 partial at
-  `db/kami-oracle.duckdb.session2p5.bak`. Keep both until session
-  3.5 confirms clean data, then delete the partials.
-- Co-hosted service (`ingester.serve`) is built and tested but **not
-  launched** — DuckDB per-process lock means only one of
-  `{serve, poller, backfill}` may hold the DB at a time, and backfill
-  is holding it. Part 3 of the session 3 brief is deferred to 3.5.
-- All 10 `tests/test_api.py` + 10 `tests/test_system_registry.py`
-  tests pass.
+- **Acceptance gate passed.** 7-day backfill (actually 10.6 days,
+  27,550,126..27,970,125) finished clean at 2026-04-24 18:56 UTC:
+  420,001 blocks, 478,358 actions, **81.6% harvest coverage**, 7,019
+  unique kami in harvest, 0 survival-loop resumes across the 49.9 h
+  run. Validator cross-check (live last 2000 blocks) returned 0
+  unknown selectors and 0 decode errors. See
+  `memory/decoder-notes.md` → "Session 3.5 backfill summary".
+- **Co-hosted serve is live** in screen `kami-oracle` on
+  `127.0.0.1:8787`. All 8 endpoints verified; bounds caps
+  (`MAX_SINCE_DAYS=28`, `MAX_LIMIT=2000`) reject with 422. Cursor
+  was advancing normally at session end. See
+  `memory/decoder-notes.md` → "Session 3.5 serve launch health
+  check" for the 10-min cursor-advance snapshot.
+- **Founder-testing guide** at `memory/founder-testing.md` —
+  SSH-tunnel command, endpoint catalog, caveats, stop/restart.
+- **Poller catchup**: at session-3.5 end the poller was catching up
+  ~76k blocks between backfill end (27,970,125) and head
+  (~28,046,946). At ~2.35 blk/s that's ~9 h of catchup. By the time
+  Session 4 starts, cursor should be at or near head and `/health`
+  will show `last_block_scanned` within a few blocks of chain head.
+- **Unknown-systems.md**: 1,137 new rows appended during backfill,
+  all selector `0x09c90324` (1,134 against `system.quest.accept`,
+  3 against `system.account.use.item`). Tier-B candidate, pending
+  signature confirmation. Committed in `b33501e`.
 - `questions-for-human.md` is empty.
-
-### Headline from session 3 — registry snapshot fix landed
-
-The session 2.5 hypothesis (H1) was correct: Kamigotchi redeploys
-system contracts periodically and the old "resolve once at head"
-registry dropped txs targeting older addresses at the match step.
-Live probe of Yominet over the target backfill window confirmed 6
-systems with ≥2 addresses, including 2 for `system.harvest.start`
-(`0x0777687Ec...` current + `0xA0b4E6F3...` older). Fix unions the
-probed address sets per `system_id` and dispatches decode on
-`system_id` rather than address. Persisted to new
-`system_address_snapshot` table so restarts rebuild the union
-without re-probing.
-
-Expected effect on the relaunched backfill: harvest action mix
-should now match the head-validation sample (~65-75% of decoded
-actions), recovering the ~2/3 of historical harvest txs the
-session-2 backfill silently dropped.
-
-### Headline from session 3 — FastAPI read-only query layer
-
-`ingester.serve` co-hosts the poller thread and a FastAPI app in
-one process sharing a single `Storage` whose methods serialize on
-`threading.Lock`. Endpoints: `/health`, `/kami/{id}/actions`,
-`/kami/{id}/summary`, `/operator/{addr}/summary`, `/actions/types`,
-`/nodes/top`, `/actions/recent`, `/registry/snapshot`. Bind defaults
-to `127.0.0.1:8787`; `_parse_bind` refuses `0.0.0.0`/`::`/wildcards
-— public exposure is a Phase-D + ADR decision. No auth layer yet.
-Graceful shutdown via SIGTERM/SIGINT: stop_event → poller drains →
-uvicorn stops → DB closes (30s join timeout).
-
-Full launch command in `memory/ops.md` under "Co-hosted serve
-(session 3 — poller + read-only HTTP in one process)".
 
 ### Do in this order
 
-1. **Check backfill health.** Resume-loop should keep it alive but
-   verify.
-   ```
-   screen -ls                                        # kami-backfill alive?
-   tail -200 logs/backfill.log                       # recent chunks + resumes
-   grep -c "done (actions" logs/backfill.log         # chunk count
-   grep "backfill: unhandled" logs/backfill.log      # any resume events?
-   ```
-   Don't open the DuckDB file while backfill writes — per-process
-   exclusive lock. Infer progress from chunk logs only.
+**Priority 1 — `kami_static` backfill worker.** Deferred since
+Stage 1 kickoff. `kami_static` is still empty (confirmed via
+`/health`). Per-kami traits (body, hand, face, background, base
+stats, owner) are needed for any analysis that groups by kami
+archetype. The ingest side is harvest-dominated event data;
+`kami_static` is the slowly-changing dimension that turns action
+rows into meaningful segments. Approach: enumerate distinct
+`kami_id`s from `kami_action`, read via `GetterSystem` at latest
+head, upsert into `kami_static` with `last_refreshed_ts`.
+Read-only, idempotent; should coexist with the live poller
+(DuckDB single-writer → run inside the serve process as a third
+thread, OR stop serve briefly and run as a one-shot). A one-shot
+with serve stopped is simpler for first cut.
 
-2. **If backfill is complete (cursor reached head-at-launch):**
-   - Capture row counts, action-type distribution (harvest %),
-     unique kami count, unique operator count, block range, wall
-     time. Commit as
-     `data: 7-day backfill complete — N raw_tx, M actions,
-     harvest coverage X%`.
-   - Harvest-coverage sanity check: bpeon wallet
-     `0x86aDb8f741E945486Ce2B0560D9f643838FAcEC2` should show many
-     `harvest_start`/`harvest_collect`/`harvest_stop` actions on
-     node 47 (Kamibots auto_v2). If harvest ~0 on bpeon, something
-     is still wrong — STOP and investigate before launching serve.
-   - Re-run head-validation via `scripts/validate_decode.py` on the
-     last 2000 blocks and confirm the action mix matches the DB
-     slice closely. Mismatch would indicate the registry snapshot
-     still missed something.
-   - Delete partial backups `db/kami-oracle.duckdb.session2.bak`
-     and `db/kami-oracle.duckdb.session2p5.bak` once coverage is
-     confirmed healthy.
+**Priority 2 — daily rollup job.** `/actions/types?since_days=N`
+full-scans `kami_action` on every call; for 478k rows it's still
+fast (<120 ms), but at steady-state with 2-4× that it'll matter.
+Precompute a `daily_action_rollup(date, action_type, count)` table
+and have `/actions/types` union recent rollup rows with a partial
+scan of the current day. Similar shape for `/nodes/top`.
+Materialize via a periodic job (the existing `ingester.prune`
+hook point is a natural place).
 
-3. **Launch co-hosted serve (Part 3 of session 3 brief, deferred):**
-   Only after step 2's acceptance gate passes.
-   ```
-   screen -dmS kami-oracle -L -Logfile ~/kami-oracle/logs/serve.log \
-     bash -c 'cd ~/kami-oracle && exec .venv/bin/python -m ingester.serve'
-   ```
-   Verify (from a second SSH):
-   ```
-   curl -s http://127.0.0.1:8787/health | jq .
-   curl -s http://127.0.0.1:8787/registry/snapshot | jq '.n_addresses'
-   curl -s 'http://127.0.0.1:8787/operator/0x86aDb8f741E945486Ce2B0560D9f643838FAcEC2/summary?since_days=7' | jq .
-   ```
-   Watch `cursor.last_block_scanned` advance across successive
-   `/health` calls to confirm the poller thread is alive. Commit
-   health snapshot + bpeon-op summary to
-   `memory/decoder-notes.md` under a new "Session 3.5 — serve
-   launch" section.
+### Deferred (not Session 4 unless human asks)
 
-4. **Start the daily prune:** `python -m ingester.prune` enforces
-   the 7-day rolling window. Add to a cron / schedule. Not needed
-   immediately (≤1 week of data by definition at backfill end).
+- **Tier-B overlay batch** for selector `0x09c90324`. Needs either
+  a `kami_context/system-ids.md` bump that documents the signature,
+  or a deployed-bytecode decompile to confirm. Do not guess.
+- **Cross-action stitching** — materialize `harvest_start →
+  harvest_stop → harvest_collect` chains keyed by `harvest_id` so
+  founder queries don't need window-function joins. Nice-to-have;
+  not blocking analysis.
+- **Scheduled prune worker** for the 7-day rolling window.
+  Currently manual (`python -m ingester.prune`). At 10.6 days of
+  data it's not urgent but will become so within a week.
+- **Concurrency refactor** for faster backfills. Single-threaded
+  pipeline is ~2.35 blocks/s; a thread-pooled
+  `get_block + receipt` could 3–5× this. Not worth it for Stage 1;
+  backfill frequency is low.
+- **Upstream ABI re-vendoring** (equip, trade, marketplace,
+  kami721). Wait for a kamigotchi-context release unless a new
+  critical selector shows up in `memory/unknown-systems.md`.
+- **Phase D** (public endpoint + auth layer + MCP). ADR-gated,
+  human-authored decision. `_parse_bind` in `ingester/serve.py`
+  blocks non-loopback binds as a defensive backstop.
 
-### Deferred (not session 3.5 unless human asks)
+### Operational notes
 
-- `kami_static` backfill worker (per-kami trait snapshots via
-  GetterSystem). Waiting on steady-state ingest.
-- Upstream ABI re-vendoring (equip, trade, marketplace, kami721).
-  Wait for a kamigotchi-context release unless something critical
-  surfaces in `memory/unknown-systems.md`.
-- Concurrency refactor for faster backfills. Single-threaded
-  pipeline is ~2.4 blocks/s; a thread-pooled get_block + receipt
-  could 3–5x this. Not worth it for Stage 1.
-- ~400 `system.quest.accept` selector `0x09c90324` entries in
-  `memory/unknown-systems.md` (appended during session 3 backfill).
-  Tier B per overlay policy — needs either a `system-ids.md`
-  update from upstream or deployed-bytecode confirmation of the
-  signature before we can add an overlay.
-- Phase D (hosted endpoint + auth layer + MCP). The co-hosted
-  serve is the Stage-1 stand-in bound to loopback; promoting it
-  to a public endpoint is an ADR-gated decision, not a mechanical
-  change.
+- DB file: `db/kami-oracle.duckdb`. DuckDB holds a per-process
+  exclusive lock — only one of `{serve, poller, backfill, prune}`
+  may hold it. To work on the DB directly (read-only), the serve
+  process must be stopped first.
+- Backup files: `db/kami-oracle.duckdb.session2.bak` and
+  `db/kami-oracle.duckdb.session2p5.bak` can be deleted now that
+  Session 3.5 has confirmed clean data. The next session can safely
+  `rm` both.
+- Serve restart: see `memory/founder-testing.md` → "Stopping the
+  service cleanly".
