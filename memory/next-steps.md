@@ -1,92 +1,116 @@
 # Next Steps
 
-## Session 4 — pick up from here
+## Session 5 — public plane
 
-### Current state at session 3.5 end (2026-04-24 21:xx UTC)
+Session 4 closed Stage 1's internal governance pass: the service is
+managed by systemd (`kami-oracle.service`, auto-restart + auto-start
+on reboot), bound to `0.0.0.0:8787` with bearer-token auth, the 7-day
+window self-prunes on a 3600 s cadence, and `/sql` lets any
+authenticated caller run bounded read-only queries. Token lives in
+`~/kami-oracle/.env` as `KAMI_ORACLE_API_TOKEN`. Full hand-off at
+`memory/session-4-handoff.md`.
 
-- **Acceptance gate passed.** 7-day backfill (actually 10.6 days,
-  27,550,126..27,970,125) finished clean at 2026-04-24 18:56 UTC:
-  420,001 blocks, 478,358 actions, **81.6% harvest coverage**, 7,019
-  unique kami in harvest, 0 survival-loop resumes across the 49.9 h
-  run. Validator cross-check (live last 2000 blocks) returned 0
-  unknown selectors and 0 decode errors. See
-  `memory/decoder-notes.md` → "Session 3.5 backfill summary".
-- **Co-hosted serve is live** in screen `kami-oracle` on
-  `127.0.0.1:8787`. All 8 endpoints verified; bounds caps
-  (`MAX_SINCE_DAYS=28`, `MAX_LIMIT=2000`) reject with 422. Cursor
-  was advancing normally at session end. See
-  `memory/decoder-notes.md` → "Session 3.5 serve launch health
-  check" for the 10-min cursor-advance snapshot.
-- **Founder-testing guide** at `memory/founder-testing.md` —
-  SSH-tunnel command, endpoint catalog, caveats, stop/restart.
-- **Poller catchup**: at session-3.5 end the poller was catching up
-  ~76k blocks between backfill end (27,970,125) and head
-  (~28,046,946). At ~2.35 blk/s that's ~9 h of catchup. By the time
-  Session 4 starts, cursor should be at or near head and `/health`
-  will show `last_block_scanned` within a few blocks of chain head.
-- **Unknown-systems.md**: 1,137 new rows appended during backfill,
-  all selector `0x09c90324` (1,134 against `system.quest.accept`,
-  3 against `system.account.use.item`). Tier-B candidate, pending
-  signature confirmation. Committed in `b33501e`.
-- `questions-for-human.md` is empty.
+Session 5 makes the service reachable from outside the VPC over
+HTTPS, adds the supporting durability + developer ergonomics, and
+updates CLAUDE.md to reflect the Phase-D transition.
+
+### Pre-reqs (human-ops)
+
+The gcloud commands listed at the bottom of
+`memory/session-4-handoff.md` must run first. They:
+- tag `kami-oracle` and `kami-agent` VMs
+- open agent→oracle:8787 over internal VPC
+- reserve a static external IP and attach it to `kami-oracle`
+- open :443 and :80 on `kami-oracle` from 0.0.0.0/0
+
+**Session 5 must not proceed past Part 2 until the static IP is
+attached** — the sslip.io hostname depends on it.
 
 ### Do in this order
 
-**Priority 1 — `kami_static` backfill worker.** Deferred since
-Stage 1 kickoff. `kami_static` is still empty (confirmed via
-`/health`). Per-kami traits (body, hand, face, background, base
-stats, owner) are needed for any analysis that groups by kami
-archetype. The ingest side is harvest-dominated event data;
-`kami_static` is the slowly-changing dimension that turns action
-rows into meaningful segments. Approach: enumerate distinct
-`kami_id`s from `kami_action`, read via `GetterSystem` at latest
-head, upsert into `kami_static` with `last_refreshed_ts`.
-Read-only, idempotent; should coexist with the live poller
-(DuckDB single-writer → run inside the serve process as a third
-thread, OR stop serve briefly and run as a one-shot). A one-shot
-with serve stopped is simpler for first cut.
+**Part 1 — Caddy on :443 with TLS via Let's Encrypt.**
+Reverse-proxy from `<ip-with-dashes>.sslip.io` (443) to
+`127.0.0.1:8787` (the co-hosted FastAPI). Caddy handles HTTP-01
+challenge on :80 and auto-renews. Install via apt, run as its own
+systemd service, config at `/etc/caddy/Caddyfile`. The Caddyfile
+should also force-redirect :80 → :443 for human traffic.
 
-**Priority 2 — daily rollup job.** `/actions/types?since_days=N`
-full-scans `kami_action` on every call; for 478k rows it's still
-fast (<120 ms), but at steady-state with 2-4× that it'll matter.
-Precompute a `daily_action_rollup(date, action_type, count)` table
-and have `/actions/types` union recent rollup rows with a partial
-scan of the current day. Similar shape for `/nodes/top`.
-Materialize via a periodic job (the existing `ingester.prune`
-hook point is a natural place).
+Expose **only** the eight auth'd routes + `/health` through the
+reverse proxy. Don't leak `/docs`, `/openapi.json`, or any FastAPI
+default. Simplest is a Caddy `handle` list; otherwise set
+`openapi_url=None` on the FastAPI app.
 
-### Deferred (not Session 4 unless human asks)
+Check in a `ops/Caddyfile` template (tokenized — actual hostname
+gets filled in on the VM).
 
-- **Tier-B overlay batch** for selector `0x09c90324`. Needs either
-  a `kami_context/system-ids.md` bump that documents the signature,
-  or a deployed-bytecode decompile to confirm. Do not guess.
-- **Cross-action stitching** — materialize `harvest_start →
-  harvest_stop → harvest_collect` chains keyed by `harvest_id` so
-  founder queries don't need window-function joins. Nice-to-have;
-  not blocking analysis.
-- **Scheduled prune worker** for the 7-day rolling window.
-  Currently manual (`python -m ingester.prune`). At 10.6 days of
-  data it's not urgent but will become so within a week.
-- **Concurrency refactor** for faster backfills. Single-threaded
-  pipeline is ~2.35 blocks/s; a thread-pooled
-  `get_block + receipt` could 3–5× this. Not worth it for Stage 1;
-  backfill frequency is low.
-- **Upstream ABI re-vendoring** (equip, trade, marketplace,
-  kami721). Wait for a kamigotchi-context release unless a new
-  critical selector shows up in `memory/unknown-systems.md`.
-- **Phase D** (public endpoint + auth layer + MCP). ADR-gated,
-  human-authored decision. `_parse_bind` in `ingester/serve.py`
-  blocks non-loopback binds as a defensive backstop.
+**Part 2 — Rate limit middleware.**
+Add `slowapi` (or similar lightweight rate-limiter) to
+`ingester/api.py`. Cap: 60 req/min per IP on GETs, 10 req/min per
+IP on `/sql`, no cap on `/health` (uptime probes). Limits should
+key on `X-Forwarded-For` set by Caddy, not the direct peer (which
+will always be 127.0.0.1). Return 429 on breach.
 
-### Operational notes
+**Part 3 — Nightly GCS backup.**
+Cron (systemd timer, not crontab) at 03:00 UTC daily. Flow:
+
+1. `SIGTERM` the serve process so DuckDB flushes cleanly.
+2. `gsutil cp db/kami-oracle.duckdb gs://<bucket>/kami-oracle/<date>.duckdb`
+3. Restart serve via `systemctl start kami-oracle`.
+
+Total downtime ~20 s. Keep the last 14 daily snapshots; lifecycle
+rule on the bucket handles expiry. Bucket name goes in a new
+`ops/gcs-backup.env` (gitignored) that the timer unit sources.
+
+**Part 4 — Colab starter notebook.**
+New file `notebooks/kami-oracle-colab.ipynb` with:
+- auth cell that reads the token from a Colab secret
+- health check
+- 2-3 example `/sql` queries showing typical aggregations
+- one example pull-and-plot using pandas
+
+The notebook must not check in any token value.
+
+**Part 5 — CLAUDE.md Phase D note.**
+Rewrite the "Current phase" and "Guardrails — never do" sections in
+`CLAUDE.md` to reflect that the oracle **is** now publicly reachable
+(token-auth'd), so the blanket "never expose an external endpoint"
+rule no longer applies. Keep the spirit: still no MCP, still
+read-only chain, still no signing.
+
+### Deferred (not Session 5 unless human asks)
+
+- **`kami_static` trait backfill.** Still empty; will matter once
+  queries want to segment by body / hand / face. One-shot via
+  `GetterSystem` read at head, upsert keyed on `kami_id`. Ingest is
+  happy without it.
+- **Daily rollup job.** `/actions/types` full-scans kami_action
+  on every call; fine at current volume (~490k rows, ~115 ms) but
+  worth precomputing `daily_action_rollup(date, action_type,
+  count)` before the window grows to 28 days.
+- **Decoder fix for harvest_stop / harvest_collect kami_id.**
+  Currently NULL for those action_types (harvest_start populates
+  correctly). A `GROUP BY kami_id` on those types collapses to one
+  null bucket. Likely requires a post-decode lookup via
+  `harvest_id → kami_id`, or extracting kami_id from a different
+  calldata slot. See decoder-notes.md "Session 4 internal plane
+  smoke test" → "Data-quality note".
+- **Tier-B overlay batch** for selector `0x09c90324` against
+  `system.quest.accept`. Waiting on signature confirmation.
+- **Cross-action stitching** — materialize harvest_start →
+  harvest_stop → harvest_collect chains keyed by `harvest_id`.
+- **Concurrency refactor** for faster backfills. Single-thread
+  pipeline ~2.35 blocks/s.
+
+### Operational notes carried forward
 
 - DB file: `db/kami-oracle.duckdb`. DuckDB holds a per-process
-  exclusive lock — only one of `{serve, poller, backfill, prune}`
-  may hold it. To work on the DB directly (read-only), the serve
-  process must be stopped first.
+  exclusive lock; the serve process holds it. Use
+  `sudo systemctl stop kami-oracle` before running backfill /
+  prune / ad-hoc DuckDB shells directly on the file.
 - Backup files: `db/kami-oracle.duckdb.session2.bak` and
-  `db/kami-oracle.duckdb.session2p5.bak` can be deleted now that
-  Session 3.5 has confirmed clean data. The next session can safely
-  `rm` both.
-- Serve restart: see `memory/founder-testing.md` → "Stopping the
-  service cleanly".
+  `db/kami-oracle.duckdb.session2p5.bak` can still be deleted. Did
+  not remove them in Session 4 because the service was live and the
+  disk has room.
+- Serve logs: `logs/serve.log` (unit-appended) or
+  `sudo journalctl -u kami-oracle`.
+- Token rotation: edit `.env`, `sudo systemctl restart kami-oracle`.
