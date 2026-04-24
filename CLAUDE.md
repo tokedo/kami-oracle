@@ -16,7 +16,7 @@ re-derive strategy from first principles. Top players have already
 encoded months of optimization in their on-chain tx history — this
 service makes that queryable.
 
-## Current phase: Stage 1 (Phase A of ADR-004) — Ingest & store
+## Current phase: Stage 1 + Phase D public query plane (authorized 2026-04-24 via session 5 prompt) — Ingest & store + public HTTPS
 
 **In scope:**
 - Continuous tail of Yominet, tx-level decoding against vendored ABIs.
@@ -134,9 +134,15 @@ Before trusting a decoded action type:
   tracked.
 - **Never add user tracking / telemetry / phone-home.** This is an
   open-source public-good service.
-- **Never expose an external endpoint** (MCP, HTTP, anything that
-  binds a public port). Stage 1 is local-only. The hosted-endpoint
-  decision happens in Phase D with a human-authored ADR.
+- **Public HTTPS endpoint is authorized** (Phase D transition,
+  2026-04-24). The API listens on `127.0.0.1:8787` behind Caddy on
+  :443 at `<ORACLE_HOST>` (currently `136-112-224-147.sslip.io`).
+  Bearer-token auth on all non-`/health` routes. Rate limited per
+  token (default 60/min). Never bind FastAPI directly to a public
+  interface — always keep Caddy in the path. Never accept
+  unauthenticated writes of any kind (the API is read-only; `/sql`
+  rejects non-SELECT, `/backup` is loopback-only). Never log the
+  full token in any file or log line.
 - **Never extend the rolling window** (currently 1 week; cap 28 days)
   without human approval in `memory/next-steps.md`.
 - **Never guess at an ABI.** If a system selector has no matching
