@@ -349,3 +349,87 @@ Three paths, in increasing complexity:
 
 Recommend option 3 for session 3+. See
 `memory/next-steps.md` for the action item.
+
+---
+
+## Session 3.5 backfill summary (2026-04-24)
+
+Registry-snapshot backfill completed cleanly.
+
+**Wall time & coverage**
+- Start: 2026-04-22 17:05 UTC, end: 2026-04-24 18:56 UTC (~49.9 h)
+- 420,001 blocks scanned, 0 survival-loop resume events in
+  `logs/backfill.log` (zero unhandled exceptions across the full run).
+- Block range in DB: 27,550,126..27,970,125
+- Time range: 2026-04-12 03:02 UTC..2026-04-22 17:05 UTC (10.59 days)
+  — wider than the nominal 7-day window; backfill seeded at head - 420k
+  blocks (~2.35 blk/s × 2 days).
+
+**Row counts**
+- `raw_tx`: 260,088
+- `kami_action`: 478,358
+- `kami_static`: 0 (not yet backfilled — deferred, see next-steps.md)
+- `system_address_snapshot`: 40 (34 unique system_ids, 6 with ≥2
+  addresses)
+
+**Action-type distribution** (top 10, 478,358 total)
+
+| action_type       | count   | %     |
+|-------------------|---------|-------|
+| harvest_stop      | 209,893 | 43.88 |
+| harvest_start     | 171,416 | 35.83 |
+| feed              |  40,611 |  8.49 |
+| skill_upgrade     |  12,343 |  2.58 |
+| move              |  10,755 |  2.25 |
+| lvlup             |  10,391 |  2.17 |
+| item_craft        |   9,321 |  1.95 |
+| harvest_collect   |   6,804 |  1.42 |
+| harvest_liquidate |   2,394 |  0.50 |
+| droptable_reveal  |     932 |  0.19 |
+
+**Harvest coverage: 81.63%** of decoded actions
+(`harvest_start + harvest_stop + harvest_collect + harvest_liquidate`
+= 390,507). **7,019 unique kami_id** in harvest rows — the registry
+fix is clearly working. Session 2.5 bugged DB showed ~0% harvest.
+
+**Registry snapshot** — 6 systems with ≥2 addresses (the redeployment
+set the fix was designed to recover):
+
+- `system.harvest.collect` (2)
+- `system.harvest.liquidate` (2)
+- `system.harvest.start` (2)
+- `system.harvest.stop` (2)
+- `system.kami.gacha.reroll` (2)
+- `system.kami.use.item` (2)
+
+**bpeon operator spot-check** (`0x86aDb8…cEC2`, session-1 validator)
+- 1,449 total actions in the 10.6-day window
+- 1,108 harvest rows across all nodes (76.5% of bpeon activity)
+- 20 harvest rows on node 47 specifically — session-3 prompt expected
+  "many on node 47 (Scrap Paths)"; actual node distribution shows
+  bpeon has shifted off node 47. Not a data-quality concern — other
+  nodes are well-populated and harvest totals are healthy.
+- Full type mix: harvest_stop 598, harvest_start 510, move 222,
+  quest_complete 28, droptable_reveal 25, scavenge_claim 24, others.
+
+**Validator cross-check** — `scripts/validate_decode.py --blocks 2000`
+ran live against head (blocks 28,044,476..28,046,475, 76k blocks
+past the DB's max since backfill ended 2 days ago):
+
+- 1,155 txs seen, 1,146 matched/decoded, **0 unknown selectors,
+  0 decode errors**, 2,474 actions produced.
+- Action mix: harvest_stop 48.0%, harvest_start 39.6%, feed 3.6%,
+  item_craft 2.7%, lvlup 2.0%, item_use 1.7%. Harvest coverage
+  88.2% — close to DB's 81.6% (difference consistent with normal
+  activity drift and the longer 10.6-day window mixing in calmer
+  periods).
+
+**Acceptance gate: PASS.** Proceeding to co-hosted serve launch.
+
+**Unknown-selector log** — 1,137 lines appended to
+`memory/unknown-systems.md` during backfill, all selector `0x09c90324`
+(1,134 against `system.quest.accept`, 3 against
+`system.account.use.item`). Both systems are in the overlay registry;
+the selector itself is not in the vendored ABI. Tier-B overlay
+candidate pending upstream signature confirmation.
+
