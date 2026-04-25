@@ -48,7 +48,9 @@ from .api import build_app
 from .chain_client import ChainClient
 from .config import configure_logging, load_config
 from .decoder import Decoder
+from .harvest_resolver import HarvestResolver
 from .ingest import process_block_range
+from .kami_static import KamiStaticReader, refresh_stale
 from .poller import REGISTRY_REPROBE_INTERVAL_S
 from .storage import Storage, read_schema_sql
 from .system_registry import SystemRegistry, resolve_systems
@@ -60,6 +62,10 @@ UNKNOWN_LOG = REPO_ROOT / "memory" / "unknown-systems.md"
 
 DEFAULT_BIND = "127.0.0.1:8787"
 MAX_CATCHUP = 50
+
+# How often the kami_static refresh thread sweeps for stale rows (seconds).
+KAMI_STATIC_REFRESH_INTERVAL_S = 6 * 60 * 60   # 6 hours
+KAMI_STATIC_MAX_AGE_HOURS = 24                  # re-read kamis older than 1 day
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
@@ -101,6 +107,7 @@ def _poller_loop(
     cfg,
     vendor_sha: str | None,
     stop_event: threading.Event,
+    resolver: HarvestResolver,
 ) -> None:
     """Tail Yominet and write decoded rows. Mirrors ingester.poller.main."""
     cursor = storage.get_cursor()
@@ -158,6 +165,7 @@ def _poller_loop(
                     end_block=end,
                     vendor_sha=vendor_sha,
                     unknown_log_path=UNKNOWN_LOG,
+                    resolver=resolver,
                 )
                 log.info(
                     "serve/poller: blocks=%d txs_seen=%d matched=%d decoded=%d "
@@ -189,6 +197,41 @@ def _poller_loop(
                 next_block = db_cur + 1
 
     log.info("serve/poller: stop_event set; exiting poller loop")
+
+
+def _kami_static_loop(
+    *,
+    reader: KamiStaticReader,
+    storage: Storage,
+    stop_event: threading.Event,
+) -> None:
+    """Periodic refresh of kami_static.
+
+    Sleeps ``KAMI_STATIC_REFRESH_INTERVAL_S`` between sweeps. Each sweep
+    refreshes kamis that are missing from ``kami_static`` or whose
+    ``last_refreshed_ts`` is older than ``KAMI_STATIC_MAX_AGE_HOURS``.
+
+    First sweep runs immediately (after a 60s warm-up that lets the poller
+    register the latest kami_ids); on a fresh DB this is the bootstrap.
+    """
+    log.info(
+        "serve/kami_static: starting — sweep every %ds, max_age=%dh",
+        KAMI_STATIC_REFRESH_INTERVAL_S, KAMI_STATIC_MAX_AGE_HOURS,
+    )
+    if stop_event.wait(60):  # initial warm-up
+        return
+    while not stop_event.is_set():
+        try:
+            stats = refresh_stale(
+                storage, reader,
+                max_age_hours=KAMI_STATIC_MAX_AGE_HOURS,
+            )
+            log.info("serve/kami_static: sweep done — %s", stats)
+        except Exception as e:  # noqa: BLE001
+            log.exception("serve/kami_static: sweep failed: %s", e)
+        if stop_event.wait(KAMI_STATIC_REFRESH_INTERVAL_S):
+            break
+    log.info("serve/kami_static: stop_event set; exiting")
 
 
 def _prune_loop(
@@ -269,6 +312,9 @@ def main() -> int:
         if cfg.vendor_sha_path.exists() else None
     )
 
+    resolver = HarvestResolver()
+    resolver.bootstrap_from_db(storage)
+
     stop_event = threading.Event()
     poller_thread = threading.Thread(
         target=_poller_loop,
@@ -280,6 +326,7 @@ def main() -> int:
             cfg=cfg,
             vendor_sha=vendor_sha,
             stop_event=stop_event,
+            resolver=resolver,
         ),
         name="kami-poller",
         daemon=True,
@@ -293,6 +340,31 @@ def main() -> int:
         daemon=True,
     )
     prune_thread.start()
+
+    # kami_static refresh thread. Lazy: only starts the sweeps if the
+    # GetterSystem address resolved in the registry — otherwise log and
+    # skip so the rest of the service still runs.
+    kami_static_thread: threading.Thread | None = None
+    try:
+        ks_reader = KamiStaticReader(client, registry, cfg.abi_dir)
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "serve: kami_static refresh thread NOT started — %s. "
+            "Re-vendor kami_context (system.getter ABI) and restart.", e,
+        )
+        ks_reader = None
+    if ks_reader is not None:
+        kami_static_thread = threading.Thread(
+            target=_kami_static_loop,
+            kwargs=dict(
+                reader=ks_reader,
+                storage=storage,
+                stop_event=stop_event,
+            ),
+            name="kami-static",
+            daemon=True,
+        )
+        kami_static_thread.start()
 
     app = build_app(
         storage,
@@ -334,6 +406,10 @@ def main() -> int:
         prune_thread.join(timeout=5)
         if prune_thread.is_alive():
             log.warning("serve: prune thread did not exit within 5s")
+        if kami_static_thread is not None:
+            kami_static_thread.join(timeout=10)
+            if kami_static_thread.is_alive():
+                log.warning("serve: kami_static thread did not exit within 10s")
         try:
             storage.close()
         except Exception as e:  # noqa: BLE001

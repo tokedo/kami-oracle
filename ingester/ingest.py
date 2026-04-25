@@ -19,6 +19,7 @@ from web3 import Web3
 
 from .chain_client import ChainClient
 from .decoder import Decoder, DecodedAction
+from .harvest_resolver import HarvestResolver
 from .storage import RawTx, Storage
 from .system_registry import SystemRegistry
 
@@ -66,6 +67,7 @@ def process_block_range(
     end_block: int,
     vendor_sha: str | None,
     unknown_log_path: Path | None = None,
+    resolver: HarvestResolver | None = None,
 ) -> IngestStats:
     stats = IngestStats()
     known_addrs = registry.known_addresses()
@@ -155,6 +157,16 @@ def process_block_range(
                     f"- tx={tx_hash_hex} to={to_cs} system={info.system_id if info else '?'} "
                     f"selector={result.selector_hex} DECODE_ERR reason={result.reason}"
                 )
+
+        if resolver is not None and action_batch:
+            # Fold every fresh kami_id into the map first, then stitch. This
+            # ordering matters when a single block contains both a
+            # harvest_start and a harvest_stop for the same kami — register
+            # the start before the stop reads back from the map.
+            resolver.observe_actions(action_batch)
+            n_stitched = resolver.stitch(action_batch)
+            if n_stitched:
+                log.debug("ingest: stitched %d kami_id from harvest_id", n_stitched)
 
         if storage is not None and (raw_batch or action_batch):
             storage.upsert_raw_txs(raw_batch)

@@ -155,16 +155,16 @@ SYSTEM_FIELD_MAP: dict[str, dict[str, Any]] = {
         "taxAmt":    ("metadata", "tax_amt"),
     },
     "system.harvest.stop": {
-        "id":  ("metadata", "harvest_id"),
-        "ids": ("metadata", "harvest_id"),   # batched variant (one row per id)
+        "id":  "harvest_id",
+        "ids": "harvest_id",   # batched variant (one row per id)
     },
     "system.harvest.collect": {
-        "id":  ("metadata", "harvest_id"),
-        "ids": ("metadata", "harvest_id"),
+        "id":  "harvest_id",
+        "ids": "harvest_id",
     },
     "system.harvest.liquidate": {
         "killerID": "kami_id",
-        "victimHarvID": ("metadata", "victim_harvest_id"),
+        "victimHarvID": "harvest_id",
     },
     # Kami
     "system.kami.level": {
@@ -322,10 +322,22 @@ class DecodedAction:
     node_id: str | None = None
     amount: str | None = None
     item_index: int | None = None
+    harvest_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def metadata_json(self) -> str:
         return json.dumps(self.metadata, sort_keys=True, default=_jsonable)
+
+
+def _harvest_id_for_kami(kami_id_int: int) -> str:
+    """Compute the harvest entity id for a kami_id.
+
+    Per kamigotchi-context/integration/architecture.md: each kami has at most
+    one harvest entity at a time, with id ``keccak256(b"harvest" || kami_id_be)``.
+    Verified against bpeon's harvest_start ↔ harvest_stop pairs (Session 6).
+    """
+    digest = keccak(b"harvest" + kami_id_int.to_bytes(32, "big"))
+    return str(int.from_bytes(digest, "big"))
 
 
 def _jsonable(v: Any) -> Any:
@@ -605,6 +617,8 @@ class Decoder:
                 row.amount = _coerce_decimal(val)
             elif rule == "item_index":
                 row.item_index = _coerce_int(val)
+            elif rule == "harvest_id":
+                row.harvest_id = _coerce_decimal(val)
             else:
                 log.warning(
                     "decoder: unknown field-map target %r for %s.%s",
@@ -613,6 +627,17 @@ class Decoder:
                 metadata[name] = _meta_value(typ, val)
 
         row.metadata = metadata
+
+        # harvest_start carries kami_id but not harvest_id in calldata. The
+        # harvest entity id is deterministic — keccak256(b"harvest" || kami_id)
+        # — so we derive it here. This unblocks the kami_id stitch on
+        # harvest_stop / harvest_collect which only see harvest_id.
+        if row.action_type == "harvest_start" and row.kami_id and row.harvest_id is None:
+            try:
+                row.harvest_id = _harvest_id_for_kami(int(row.kami_id))
+            except (ValueError, TypeError):
+                pass
+
         return row
 
 

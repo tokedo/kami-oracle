@@ -75,8 +75,11 @@ def test_harvest_stop_executeTyped(decoder_and_addrs):
     assert len(r.actions) == 1
     a = r.actions[0]
     assert a.action_type == "harvest_stop"
-    assert a.kami_id is None           # harvest.stop takes harvest instance ID
-    assert a.metadata["harvest_id"] == str(
+    # The decoder writes harvest_id as a first-class column. kami_id stays
+    # NULL here — the in-process resolver (HarvestResolver) does the stitch
+    # in the ingest pipeline, not the decoder itself.
+    assert a.kami_id is None
+    assert a.harvest_id == str(
         0xb6832b52ae4e5ae30f01d6efb8a5a3c0c2ee4f90dc3478d1ed35cfbe2c37e44f
     )
 
@@ -109,6 +112,33 @@ def test_harvest_start_executeTyped_4arg_overlay(decoder_and_addrs):
     assert a.node_id == "16"
     assert a.metadata["taxer_id"] == "0"
     assert a.metadata["tax_amt"] == "0"
+
+
+def test_harvest_start_derives_harvest_id_from_kami_id(decoder_and_addrs):
+    """harvest_start should auto-compute harvest_id = keccak("harvest" || kami)."""
+    from eth_utils import keccak
+
+    dec, reg = decoder_and_addrs
+    addr = _addr_for(reg, "system.harvest.start")
+    calldata = bytes.fromhex(
+        "c8372a87"
+        + "0000000000000000000000000000000000000000000000000000000000000063"  # kami=99
+        + "0000000000000000000000000000000000000000000000000000000000000010"
+        + "0000000000000000000000000000000000000000000000000000000000000000"
+        + "0000000000000000000000000000000000000000000000000000000000000000"
+    )
+    r = dec.decode_tx(
+        tx_hash="0x" + "55" * 32,
+        from_addr="0x0000000000000000000000000000000000000001",
+        to_addr=addr,
+        calldata=calldata,
+        block_number=1, block_timestamp=1, status=1,
+    )
+    assert r.status == "ok"
+    a = r.actions[0]
+    assert a.kami_id == "99"
+    expected = str(int.from_bytes(keccak(b"harvest" + (99).to_bytes(32, "big")), "big"))
+    assert a.harvest_id == expected
 
 
 def test_harvest_start_executeBatched_fans_out(decoder_and_addrs):
