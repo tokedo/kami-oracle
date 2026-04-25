@@ -20,8 +20,19 @@ from web3 import Web3
 from .chain_client import ChainClient
 from .decoder import Decoder, DecodedAction
 from .harvest_resolver import HarvestResolver
+from .musu import decode_musu_drains, musu_amount_for_harvest
 from .storage import RawTx, Storage
 from .system_registry import SystemRegistry
+
+# Action types whose ``amount`` should be filled from receipt-log MUSU drains.
+# ``harvest_start`` is excluded — it has no payout (the harvest entity's
+# bounty is 0 until the first stop/collect/liquidate). See
+# ``memory/decoder-notes.md`` "Session 7 — MUSU Transfer probe".
+MUSU_PAYOUT_ACTIONS = frozenset({
+    "harvest_collect",
+    "harvest_stop",
+    "harvest_liquidate",
+})
 
 log = logging.getLogger(__name__)
 
@@ -145,6 +156,23 @@ def process_block_range(
                 status=status,
             )
             stats.bump(result.status, len(result.actions))
+
+            # Pair MUSU bounty drains from the receipt with harvest_*
+            # action rows. The receipt was already fetched above, so this
+            # adds no extra RPC calls. Drains are keyed by harvest_id
+            # (uint256), which the action rows carry as ``harvest_id``
+            # (or, on older liquidate rows, in metadata.victim_harvest_id).
+            if result.actions:
+                drains = decode_musu_drains(receipt)
+                if drains:
+                    for action in result.actions:
+                        if action.action_type not in MUSU_PAYOUT_ACTIONS:
+                            continue
+                        h_id = action.harvest_id or action.metadata.get(
+                            "victim_harvest_id"
+                        )
+                        action.amount = musu_amount_for_harvest(drains, h_id)
+
             action_batch.extend(result.actions)
 
             if result.status == "unknown_selector":

@@ -64,23 +64,33 @@ def _decode_uint256_bytes(data: bytes) -> int | None:
 
 
 def decode_musu_drains(receipt: Any) -> dict[int, int]:
-    """Return ``{harvest_id_int: max_value}`` for every harvest entity drained
-    in this receipt.
+    """Return ``{harvest_id_int: bounty}`` for every harvest entity actually
+    drained in this receipt.
 
     Walks ``receipt['logs']`` once and, for each ``ComponentValueSet``
     event from the World contract on the ``component.value`` component,
-    records the value written. The returned mapping uses the entity id
-    (a uint256 carried in topics[3]) as the key; the value is the
-    max uint256 written to that entity inside this tx — which is the
-    pre-drain bounty, since the post-drain write is always 0.
+    records the values written per entity. An entity is considered
+    "drained" only if it received **both** at least one non-zero write
+    *and* at least one zero write in the same tx — the standard
+    harvest_collect/stop/liquidate pattern is ``[N, 0]`` (or
+    ``[N, 0, 0]`` for stop). The returned mapping holds the gross
+    bounty (the max non-zero value).
 
-    Pure function: no DB access, no chain calls. Filters silently
-    skip logs from other contracts and other event signatures. Logs
-    whose ABI-encoded ``data`` doesn't decode as a 32-byte uint256
-    are skipped (could happen if MUDS ever stores a non-scalar value
-    on ``component.value``; we haven't seen that on Yominet).
+    Why the both-required rule: ``executeBatchedAllowFailure`` lets a
+    bot call stop on an already-stopped harvest. The system writes the
+    current accrued value to the entity but does **not** drain it (no
+    follow-up zero write), and the tx still succeeds. Crediting that
+    write as a payout would double-count past harvests that were
+    actually drained in earlier txs — confirmed empirically against
+    ``0x5c070ce3…`` / ``0x827a80d7…`` / ``0xbceab1d5…`` (Session 7
+    live observation; identical 1665+956 "drain" three times in 18s
+    against the same two harvest entities).
+
+    Pure function: no DB access, no chain calls. Logs whose
+    ABI-encoded ``data`` doesn't decode as a 32-byte uint256 are
+    skipped.
     """
-    drains: dict[int, int] = {}
+    by_entity: dict[int, list[int]] = {}
     logs: Iterable[Any] = receipt.get("logs") if isinstance(receipt, dict) else receipt["logs"]
     for log in logs:
         if _log_address_lower(log) != WORLD_ADDRESS_LOWER:
@@ -104,9 +114,14 @@ def decode_musu_drains(receipt: Any) -> dict[int, int]:
         value = _decode_uint256_bytes(data)
         if value is None:
             continue
-        prev = drains.get(entity_id)
-        if prev is None or value > prev:
-            drains[entity_id] = value
+        by_entity.setdefault(entity_id, []).append(value)
+
+    drains: dict[int, int] = {}
+    for entity_id, values in by_entity.items():
+        non_zero = [v for v in values if v > 0]
+        has_zero = any(v == 0 for v in values)
+        if non_zero and has_zero:
+            drains[entity_id] = max(non_zero)
     return drains
 
 

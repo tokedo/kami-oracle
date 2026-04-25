@@ -88,12 +88,14 @@ def test_filters_logs_from_other_contracts():
     # WETH Transfer events live at 0xE1Ff7038… — we must not record them
     # as MUSU drains. The Session 6 hand-off conflated the two.
     receipt = {"logs": [
-        # Real MUSU drain on World
+        # Real MUSU drain on World (bounty + zero-reset)
         _make_cvs_log(log_index=1, address=WORLD_ADDRESS_LOWER,
                       component_id=VALUE_COMPONENT_ID, entity=42, value=1001),
+        _make_cvs_log(log_index=2, address=WORLD_ADDRESS_LOWER,
+                      component_id=VALUE_COMPONENT_ID, entity=42, value=0),
         # WETH Transfer at the WETH contract — wrong address; should be ignored
         {
-            "logIndex": 2,
+            "logIndex": 3,
             "address": "0xE1Ff7038eAAAF027031688E1535a055B2Bac2546",
             "topics": [
                 "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
@@ -182,9 +184,46 @@ def test_real_recorded_receipt_harvest_collect():
     assert musu_amount_for_harvest(drains, "999999") is None
 
 
+def test_no_op_stop_writes_value_but_no_zero_reset():
+    # executeBatchedAllowFailure on an already-stopped harvest writes the
+    # current accrued amount to the entity but does NOT drain it.
+    # We must not credit such writes as payouts. Empirically observed in
+    # Session 7 against 0x5c070ce3… (1665) — paired stop+stop+stop in 18s
+    # all writing 1665 with no zero-reset.
+    receipt = {"logs": [
+        _make_cvs_log(log_index=1, address=WORLD_ADDRESS_LOWER,
+                      component_id=VALUE_COMPONENT_ID, entity=42, value=1665),
+    ]}
+    assert decode_musu_drains(receipt) == {}
+
+
+def test_only_zero_writes_no_drain():
+    # Pathological: only zero writes, no non-zero. Should not credit.
+    receipt = {"logs": [
+        _make_cvs_log(log_index=1, address=WORLD_ADDRESS_LOWER,
+                      component_id=VALUE_COMPONENT_ID, entity=42, value=0),
+    ]}
+    assert decode_musu_drains(receipt) == {}
+
+
+def test_two_drains_one_no_op_in_same_tx():
+    # Mixed batched tx: one harvest actually drains, another no-ops.
+    # Decoder must credit only the drained one.
+    receipt = {"logs": [
+        _make_cvs_log(log_index=1, address=WORLD_ADDRESS_LOWER,
+                      component_id=VALUE_COMPONENT_ID, entity=11, value=1665),  # no-op
+        _make_cvs_log(log_index=2, address=WORLD_ADDRESS_LOWER,
+                      component_id=VALUE_COMPONENT_ID, entity=22, value=300),   # drain
+        _make_cvs_log(log_index=3, address=WORLD_ADDRESS_LOWER,
+                      component_id=VALUE_COMPONENT_ID, entity=22, value=0),     # drain reset
+    ]}
+    assert decode_musu_drains(receipt) == {22: 300}
+
+
 def test_supports_hexbytes_topics():
     # web3.py returns topics as HexBytes (a bytes subclass). Our normalizer
-    # should handle them transparently.
+    # should handle them transparently. Need both bounty + zero-reset to
+    # register as a drain.
     receipt = {"logs": [
         {
             "logIndex": 1,
@@ -197,6 +236,19 @@ def test_supports_hexbytes_topics():
             ],
             "data": bytes.fromhex(
                 _abi_uint256_bytes_payload(7).removeprefix("0x")
+            ),
+        },
+        {
+            "logIndex": 2,
+            "address": WORLD_ADDRESS_LOWER,
+            "topics": [
+                COMPONENT_VALUE_SET_TOPIC0,
+                VALUE_COMPONENT_ID.to_bytes(32, "big"),
+                (0).to_bytes(32, "big"),
+                (42).to_bytes(32, "big"),
+            ],
+            "data": bytes.fromhex(
+                _abi_uint256_bytes_payload(0).removeprefix("0x")
             ),
         },
     ]}
