@@ -190,17 +190,46 @@ def build_app(
     # the systemd healthcheck don't need a token.
     @app.get("/health")
     def health() -> dict[str, Any]:
+        import datetime as _dt
         cursor = storage.get_cursor_state()
         n_raw = storage.fetchone("SELECT COUNT(*) FROM raw_tx")
         n_actions = storage.fetchone("SELECT COUNT(*) FROM kami_action")
         snapshot_rows = storage.fetchone("SELECT COUNT(*) FROM system_address_snapshot")
+        n_static = storage.fetchone("SELECT COUNT(*) FROM kami_static")
+        last_static = storage.fetchone(
+            "SELECT MAX(last_refreshed_ts) FROM kami_static"
+        )
+
+        # chain_head_lag_seconds: how far behind chain head the cursor is.
+        # Cheaper than tracking poller throughput EWMAs and more directly
+        # useful — a steady-state lag near 0 means the poller is keeping
+        # pace; a growing lag means concurrency or RPC capacity is the
+        # bottleneck. Anchor on now(UTC) - last_block_timestamp.
+        lag_s: float | None = None
+        if cursor and cursor.get("last_block_timestamp"):
+            try:
+                lbt = _dt.datetime.fromisoformat(cursor["last_block_timestamp"])
+                if lbt.tzinfo is None:
+                    lbt = lbt.replace(tzinfo=_dt.timezone.utc)
+                lag_s = max(0.0, (_dt.datetime.now(_dt.timezone.utc) - lbt).total_seconds())
+            except (TypeError, ValueError):
+                lag_s = None
+
         payload: dict[str, Any] = {
             "status": "ok",
             "cursor": cursor,
+            "chain_head_lag_seconds": lag_s,
             "row_counts": {
                 "raw_tx": int(n_raw[0]) if n_raw else 0,
                 "kami_action": int(n_actions[0]) if n_actions else 0,
+                "kami_static": int(n_static[0]) if n_static else 0,
                 "system_address_snapshot": int(snapshot_rows[0]) if snapshot_rows else 0,
+            },
+            "kami_static": {
+                "last_refreshed_ts": (
+                    last_static[0].isoformat()
+                    if last_static and last_static[0] is not None else None
+                ),
             },
         }
         if registry is not None:

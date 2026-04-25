@@ -604,3 +604,99 @@ to widen scope.
 **Status**: public plane is live, authenticated, rate-limited, with
 nightly backup wired but blocked on SA scope. Founder can run the
 Colab starter notebook once the token is in Colab secrets.
+
+# Session 6 — kami_id stitch fix + kami_static backfill
+
+Date: 2026-04-25.
+
+## Session 6 baseline (before any work)
+
+Cursor at chain head — 28075317 / 2026-04-25T14:54:01 (current UTC
+2026-04-25T14:54:10). Single-threaded poller is keeping pace; the
+"~36h behind" figure quoted in the Session 6 prompt was a Session-5
+era observation that has since recovered. **Part 3 (poller
+concurrency) is therefore not blocking the founder's golden query** —
+deferred unless we hit drift again, see hand-off note for Session 7.
+
+NULL kami_id distribution before the fix (`row_counts`: raw_tx=162009,
+kami_action=309402):
+
+| action_type        | rows    | NULL kami_id |
+|--------------------|---------|--------------|
+| harvest_stop       | 137,122 | 137,122      |
+| harvest_start      | 113,943 | 0            |
+| feed               |  23,624 | 0            |
+| skill_upgrade      |   8,106 | 0            |
+| lvlup              |   7,093 | 0            |
+| item_craft         |   6,118 | 6,118        |
+| move               |   5,725 | 5,725        |
+| harvest_collect    |   4,152 | 4,152        |
+| harvest_liquidate  |   1,177 | 0            |
+| droptable_reveal   |     594 | 594          |
+| scavenge_claim     |     562 | 562          |
+| item_use           |     474 | 474          |
+| listing_buy        |     243 | 243          |
+| quest_complete     |     239 | 239          |
+| gacha_reroll/mint  |    ~190 | ~190         |
+| item_burn          |      57 | 57           |
+| skill_respec       |      21 | 0            |
+| friend / register  |       7 | 7            |
+| goal_claim         |       7 | 7            |
+
+Session 6 only addresses harvest_stop / harvest_collect. Other
+NULL-kami_id rows (item_craft, move, scavenge_claim, etc.) are
+out-of-scope; their calldata genuinely doesn't carry a kami_id (move
+operates on the account, item_craft on a recipe, etc.) — they go
+into a deferred bucket for a future pass that joins by `from_addr +
+operator → owner_account → owned kamis` if/when needed.
+
+## How `harvest_id` relates to `kami_id` — the deterministic mapping
+
+`kamigotchi-context/integration/architecture.md` documents:
+
+> Harvest | `keccak256(abi.encodePacked("harvest", kamiEntityId))` | Per-Kami harvest state
+
+i.e. **the harvest entity ID is computed deterministically as
+`keccak256(b"harvest" || kami_id_uint256_be)`**. One kami has exactly
+one harvest entity at a time, so the relationship is bijective on the
+universe of (kami_id, harvest_id) pairs we have ever observed.
+
+Verified empirically: bpeon's most recent two harvest_start rows have
+`kami_id` values; computing `keccak256("harvest" || kami_id)` for
+each yields harvest_ids that match harvest_stop rows for the same
+operator wallet:
+
+```
+kami_id  31233132...79529404  -> harvest_id 104349738...75050068  ✓ matches stop tx 0xb626818d...
+kami_id  80999568...52636422533 -> harvest_id 11735597...00680540  ✓ matches stop tx 0xf143333d...
+```
+
+This means **no eth_call is needed** — the stitch is pure offline
+keccak. Option A (stitch) and Option B (eth_call) from the Session 6
+prompt collapse into a third option: compute the inverse map in
+Python from the universe of distinct kami_ids we have already
+observed, and use it to backfill kami_id on stop/collect rows.
+
+The IDOwnsKamiComponent reverse lookup (initial hypothesis) was
+wrong — that component maps `kami_entity → owner_account`, not
+`harvest_entity → kami_entity`. A direct `get(harvest_id)` reverts.
+
+## Distinct harvest_id cardinality
+
+Across 137,122 harvest_stop rows there are only **6,754 distinct
+harvest_ids**; across 4,152 harvest_collect rows there are **516
+distinct harvest_ids**. So the mapping is small (each harvest_id is
+re-stopped/collected ~20× on average — same kami stopped and
+restarted on the same harvest entity many times).
+
+## Decision
+
+Add a real `harvest_id VARCHAR` column to `kami_action` (schema v1
+→ v2 migration), populate it on every harvest_* row going forward,
+and stitch `kami_id` via an in-process `HarvestResolver` keyed on
+the (kami_id → keccak("harvest"||kami_id)) map. Backfill historical
+rows with a one-shot script using the same keccak.
+
+Validation: run the golden query post-fix; spot-check that bpeon's
+top-N harvesters look like his actual fleet. Sample tx hashes used
+in validation are in the commit message of the backfill script.
