@@ -52,6 +52,9 @@ REGISTRY_ABI = [
 # Derived from kami_context/system-ids.md. Keep alphabetized inside each
 # group.
 SYSTEM_ID_TO_ABI: dict[str, str] = {
+    # Read-only view system — used by ingester.kami_static to populate
+    # per-kami traits via getKami(uint256). Not a tx target itself.
+    "system.getter": "GetterSystem.json",
     # Account
     "system.account.fund": "AccountFundSystem.json",
     "system.account.move": "AccountMoveSystem.json",
