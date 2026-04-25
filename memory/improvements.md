@@ -38,3 +38,44 @@ itself. Commit hashes are filled in after the commit.
 - New runtime deps: `fastapi`, `uvicorn[standard]`, `httpx` (test-only). All pinned with a comment explaining Stage-1 loopback-only bind (`629cab3`).
 - Ops runbook updated for the co-hosted service launch command + health-check pattern (`9a99bad`).
 - **Not done this session**: launch serve (Part 3 of session 3 brief). Backfill still holds DuckDB lock; deferred to 3.5 once backfill completes. See `memory/next-steps.md`.
+
+## Session 6 — 2026-04-25
+
+- **Decoder fix (`harvest_stop` / `harvest_collect` `kami_id`)**: `harvest_id`
+  now a first-class column on `kami_action`. `HarvestResolver` stitches
+  `kami_id` via the deterministic
+  `keccak256(b"harvest" || uint256_be(kami_id))` mapping documented in
+  `kamigotchi-context/integration/architecture.md` — no eth_call per
+  tx, the inverse map is computed offline from every kami_id ever
+  observed in any action_type. First commit: `f2b2eae` (decoder +
+  resolver). Empirical: 141,274 historical stop+collect rows started
+  with NULL `kami_id`; 98.5% stitched via in-window harvest_starts +
+  another 1.6% via the wider kami_id universe; 32 orphans (0.023%)
+  remain — stops whose start predates the 7-day window and whose
+  kami_id never reappears.
+- **Schema migration v1 → v2**: added `migrations/002_add_harvest_id_column.py`
+  and a migration runner in `Storage.bootstrap()` so service restarts
+  auto-apply pending schema changes. The migration is idempotent and
+  bulk-driven (a per-row `executemany` UPDATE was unworkable at 113k
+  rows; replaced with a temp-table JOIN that finishes in seconds).
+  Commit `9c208b3`.
+- **kami_static backfill + refresh worker**: `ingester/kami_static.py`
+  reads `getKami(uint256)` from the GetterSystem, mapping the
+  `KamiShape` tuple into the schema's columns. Owner address recovered
+  offline via the address-cast pattern (`address = account_id mod
+  2^160`). Daemon thread sweeps every 6 h, refreshing kamis missing
+  from the table or older than 24 h. ThreadPoolExecutor at 8 workers
+  for the RPC-latency-bound eth_calls; DB writes single-writer behind
+  `Storage.lock`. First-run backfill TODO row count (logged inline in
+  next-steps post-run). Commit `1a50a19`.
+- **Poller concurrency refactor (deferred)**: cursor was already at
+  chain head when Session 6 opened (Session-5-era ~36 h lag had since
+  recovered). Single-threaded poller is keeping pace at ~2 blk/s
+  steady state. Re-evaluate if drift returns after a major outage or
+  redeploy.
+- **`/health` payload extras**: `kami_static` row count + last refresh
+  timestamp; `chain_head_lag_seconds` (`now - last_block_timestamp`).
+  Cheaper than EWMA throughput tracking and more directly useful for
+  spotting drift. Commit `9d43b6e`.
+- **`questions-for-human.md` cleared**: GCS service-account scope was
+  widened on 2026-04-24; nightly backups uploading cleanly.

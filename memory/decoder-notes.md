@@ -700,3 +700,64 @@ rows with a one-shot script using the same keccak.
 Validation: run the golden query post-fix; spot-check that bpeon's
 top-N harvesters look like his actual fleet. Sample tx hashes used
 in validation are in the commit message of the backfill script.
+
+## Session 6 acceptance
+
+Service restarted at 2026-04-25T15:54:17Z. Schema migrated to v2,
+`kami_static` populated with 6,916 / 6,920 candidates (4 reverts —
+burned/sacrificed kamis whose entity id no longer resolves through
+GetterSystem). harvest_id stitched on 141,242 of 141,274 historical
+harvest_stop / harvest_collect rows (99.977%).
+
+Golden-query variant (harvest count, 7-day window, the slice we have
+data for — see "MUSU NULL" gap below):
+
+```sql
+SELECT s.name, s.owner_address, COUNT(*) AS harvests
+FROM kami_action a JOIN kami_static s USING (kami_id)
+WHERE a.action_type IN ('harvest_collect','harvest_stop')
+  AND a.block_timestamp > now() - INTERVAL 7 DAY
+GROUP BY 1, 2 ORDER BY harvests DESC LIMIT 5
+```
+
+Top 5 harvesters by harvest count, 7-day window:
+
+| name             | owner_address                              | harvests |
+|------------------|--------------------------------------------|----------|
+| Kamigotchi 6931  | 0x816E29648f7A26FA22B6D6ab39bd354251D55115 |      360 |
+| Kamigotchi 10011 | 0x8649e0773018b773aE2bCd928762Ef29F026EFa6 |      110 |
+| Kamigotchi 10647 | 0x8649e0773018b773aE2bCd928762Ef29F026EFa6 |      107 |
+| Kamigotchi 5251  | 0xdb3032B18946EEd108B3De6ccd373ACEcFe3441d |      104 |
+| Kamigotchi 3511  | 0x19F8a98C3512cf16731De58f83318ec553314F46 |       98 |
+
+Kami names of the form "Kamigotchi NNNNN" are the on-chain default; only
+players who explicitly renamed their kami have human-readable names
+(e.g. "R3D", "Ari Muur" further down the list).
+
+## Session 6 — MUSU amount NULL on harvest_stop / harvest_collect (gap)
+
+`amount` is NULL for all 137k+4k harvest_stop / harvest_collect rows —
+the `kami_action.amount` column is only populated when the calldata
+itself carries an amount field (item_use, item_burn, gacha_mint,
+listing_buy, item_craft). MUSU bounty on stop/collect comes from the
+contract's internal accounting and is emitted as an ERC20 `Transfer`
+event log on the MUSU token contract
+(`0xE1Ff7038eAAAF027031688E1535a055B2Bac2546`) inside the same tx
+receipt — but the ingester currently only processes calldata, not
+receipt logs.
+
+The founder's golden query asks for `SUM(amount)` MUSU collected; that
+column will stay NULL until log decoding lands. Two options for the
+next session:
+
+1. **Add receipt log decoding to the ingester.** Each `process_block_range`
+   call already fetches `tx_receipt` for status/gas; iterating
+   `receipt.logs` and matching the MUSU Transfer signature gives us
+   per-tx MUSU values. Cheap (no extra RPC). Adds an `amount` column
+   write for the qualifying rows.
+2. **Use harvest count as the leaderboard metric.** Already works (see
+   above). Loses absolute MUSU but preserves the ranking signal.
+
+Recommended for Session 7: do (1). It's the smallest delta that makes
+the founder's golden query work end-to-end, and the same plumbing
+unlocks MUSU-based metrics for `kami-zero`'s perception loop.

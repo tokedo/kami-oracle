@@ -110,20 +110,27 @@ sudo systemctl restart kami-oracle
 echo "$NEW"  # then update Colab secret + kami-zero config
 ```
 
-## Known data caveats (as of 2026-04-24)
+## Known data caveats (as of 2026-04-25, post-Session 6)
 
-- **Cursor lag**: ingester is ~36 h behind chain head and catching up
-  at ~50 blocks per ~25 s. Queries with `now() - INTERVAL 1 DAY`
-  may return empty until catchup completes; use 7-day windows for
-  meaningful slices today. Watch `cursor.last_block_scanned` on
-  `/health`.
+- **Cursor at chain head**: the ~36h lag from Session 5 closed before
+  Session 6 opened — the single-threaded poller is keeping pace.
+  Queries with `now() - INTERVAL 1 DAY` work. The fallback anchor
+  (`MAX(block_timestamp)` instead of `now()`) is still a fine
+  defensive pattern but no longer required. Check
+  `chain_head_lag_seconds` on `/health` before running tight time
+  windows.
 - **Rolling window**: 7 days. The prune thread sweeps every 3600 s.
-- **`harvest_stop` and `harvest_collect` have NULL `kami_id`**.
-  `harvest_start` populates correctly. Aggregating those types by
-  `kami_id` collapses to one null bucket. Decoder fix is on the
-  Session 6 deferred list.
-- **`kami_static` is empty**. Per-kami trait snapshots not yet
-  backfilled — Session 6 work.
-- **Tier-B selector `0x09c90324`** (~1.1k txs against
+  Window extension to 28 days remains a Session 7+ topic.
+- **`harvest_stop` and `harvest_collect` `kami_id` is now populated**
+  for new rows AND every historical row in the window (98.5% stitched
+  via in-window harvest_start join; +1.6% stitched via the wider
+  kami_id universe; ~0.02% orphans remain — stops whose starts predate
+  the 7-day window and whose kami_id never reappears in any in-window
+  action).
+- **`kami_static` is now populated** with name / owner_address /
+  traits / base stats. Refresh sweep runs every 6 h; first sweep
+  populates all kamis observed in `kami_action`, ongoing sweeps
+  refresh rows older than 24 h. New kamis are picked up automatically.
+- **Tier-B selector `0x09c90324`** (~1.1k+ txs against
   `system.quest.accept`) is still skipped pending signature
   confirmation; counts will rise when the overlay lands.
