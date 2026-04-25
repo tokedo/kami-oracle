@@ -2,27 +2,19 @@
 
 ## Open
 
-### Session 6 — MUSU amount NULL on harvest_stop / harvest_collect
-
-The Session 6 golden query asks for `SUM(CAST(a.amount AS HUGEINT))`
-on harvest_collect / harvest_stop, but `amount` is NULL for all
-~141k of those rows. Reason: MUSU bounty isn't in the calldata —
-it's emitted as an ERC20 Transfer event log on the MUSU token
-contract (`0xE1Ff7038eAAAF027031688E1535a055B2Bac2546`) in the same
-tx receipt. The ingester currently decodes calldata only.
-
-Names + owners + harvest counts now work (top-5 by count is in
-`memory/decoder-notes.md` "Session 6 acceptance"). The leaderboard
-ranking by harvest count is a perfectly fine proxy for the founder's
-"top earners" signal — but if the founder explicitly wants
-MUSU-denominated totals, Session 7 needs to add receipt-log decoding.
-
-Recommendation: do this in Session 7 — same plumbing also unlocks
-MUSU-based metrics for `kami-zero`. Confirm priority before Session 7
-opens; if it's already obvious, treat it as the lead item there and
-no human action is required here.
+(none)
 
 ## Resolved
+
+- **Session 6 — MUSU amount NULL on harvest_stop / harvest_collect**
+  (resolved Session 7, 2026-04-25). Closed via receipt-log decoding —
+  but with one important correction: MUSU is **not** an ERC-20.
+  `0xE1Ff7038e…` is WETH; MUSU is in-game item index 1 tracked by
+  MUDS `ValueComponent` updates emitted as `ComponentValueSet`
+  events on World. Live decoder + 107,040-row historical backfill
+  populated `kami_action.amount` on harvest_collect / stop /
+  liquidate. Acceptance, cross-check, and golden-query top-5 in
+  `memory/decoder-notes.md` "Session 7 acceptance".
 
 - **Session 5 — VM service-account scope blocks GCS uploads** (resolved
   2026-04-24). Scope widened to `devstorage.read_write` (Option A);

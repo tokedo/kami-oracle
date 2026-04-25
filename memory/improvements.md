@@ -79,3 +79,64 @@ itself. Commit hashes are filled in after the commit.
   spotting drift. Commit `9d43b6e`.
 - **`questions-for-human.md` cleared**: GCS service-account scope was
   widened on 2026-04-24; nightly backups uploading cleanly.
+
+## Session 7 — 2026-04-25
+
+- **MUSU is not an ERC-20 (Session 6 hand-off correction)**: the
+  `0xE1Ff7038e…` address Session 6 named as MUSU is actually
+  **WETH** per `kami_context/chain.md` (332db78). $MUSU is in-game
+  item index 1, has no token contract, and lives in MUDS
+  `ValueComponent` keyed by
+  `keccak256("inventory.instance" || account_id || 1)`. Empirical
+  receipt walk on a real harvest_collect confirmed: the only
+  Transfer events at the WETH address are gas/fee accounting
+  (≈8e-6 ETH); the actual MUSU credit is a `ComponentValueSet`
+  emission from World. Full derivation in
+  `memory/decoder-notes.md` "Session 7 — MUSU Transfer probe".
+- **Receipt-log decoder (`ingester/musu.py`)**:
+  `decode_musu_drains(receipt) -> dict[harvest_id_int, bounty]`.
+  Walks World `ComponentValueSet` events, filters to
+  `component.value` componentId, credits an entity only when it
+  saw both a non-zero **and** a zero write in the same tx.
+  Zero-required rule rejects `executeBatchedAllowFailure` no-ops
+  on already-stopped harvests (without it, three identical
+  1665+956 "drains" 18s apart would double-count). Pure function;
+  12 unit tests including a real recorded receipt fixture.
+  Commit `21ab643`.
+- **Wired into the live decoder**: `process_block_range` already
+  fetches each tx's receipt for status/gas, so the MUSU pass adds
+  zero RPC overhead. Falls back to
+  `metadata_json.victim_harvest_id` when the `harvest_id` column
+  is NULL (true for ~99.7% of historical `harvest_liquidate`
+  rows decoded before the field-map fix landed).
+  Commit `36edfc0`.
+- **Historical backfill (`scripts/backfill_musu_amount.py`)**:
+  thread-pooled receipt walk → in-memory accumulator → single
+  end-of-run `UPDATE … FROM` over a temp table. Per-row UPDATEs
+  on DuckDB rewrite whole row groups; batching every 2000 paired
+  rows blocked the main thread for minutes (observed: 5-min
+  freeze on the first such commit). Single end-of-run commit
+  amortizes the rewrite. 107,040 / 133,177 NULL rows populated;
+  26,137 left NULL because the harvest entity wasn't drained in
+  the tx (real on-chain no-ops, not a decoder gap). 0 receipt
+  failures. Commit `084699a`.
+- **No-op stops are real and common**: 18.7% of `harvest_stop`
+  rows leave `amount = NULL` because the bot retried a stop on
+  an already-stopped harvest and the contract no-op'd. The
+  founder's "top earners" query naturally ignores these via
+  `SUM(...)`; `IS NULL` filters are the right way to count
+  effective drains.
+- **Harvest tax is implicit**: oracle records the **gross**
+  bounty drained from the harvest entity. The operator's MUSU
+  inventory only receives the *net* (gross × (1 − taxAmt)); the
+  rest goes to the taxer's inventory as a separate
+  ValueComponent write. Cross-checked 8 single-action collect
+  samples — chain delta to operator equals oracle gross times
+  (1 − tax), with most node-47 kamis at 6% tax and outliers at
+  12% / 100%.
+- **Kami_context typo found**: `system-ids.md` documents the
+  ValueComponent read fn as `getValue(uint256)`. The actual ABI
+  in `kami_context/abi/ValueComponent.json` only declares
+  `get(uint256)` and `safeGet(uint256)`. Calls to `getValue`
+  revert. Use `safeGet` from clients (it doesn't revert on
+  missing entities). Worth a kami_context PR upstream.

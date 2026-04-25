@@ -134,3 +134,62 @@ echo "$NEW"  # then update Colab secret + kami-zero config
 - **Tier-B selector `0x09c90324`** (~1.1k+ txs against
   `system.quest.accept`) is still skipped pending signature
   confirmation; counts will rise when the overlay lands.
+
+## Session 7 update — MUSU amounts populated
+
+`kami_action.amount` is now populated for `harvest_collect`,
+`harvest_stop`, and `harvest_liquidate`. Live decoder reads
+`ComponentValueSet` events from each tx receipt; backfill job
+applied the same logic to 107,040 historical rows.
+
+**Cast pattern**: MUSU is a plain integer item count. Use
+`CAST(amount AS HUGEINT)`. **Do not** divide by 1e18 — that's an
+ERC-20 pattern and MUSU isn't an ERC-20.
+
+```sql
+-- Top earners by MUSU (gross, 7d)
+SELECT s.name, s.owner_address,
+       COUNT(*) FILTER (WHERE a.action_type = 'harvest_collect') AS collects,
+       SUM(CAST(a.amount AS HUGEINT)) AS musu
+FROM kami_action a JOIN kami_static s USING (kami_id)
+WHERE a.action_type IN ('harvest_collect', 'harvest_stop')
+  AND a.block_timestamp > now() - INTERVAL 7 DAY
+GROUP BY 1, 2
+ORDER BY musu DESC NULLS LAST
+LIMIT 20;
+
+-- Liquidation leaderboard (7d)
+SELECT s.name AS liquidator, COUNT(*) AS hits,
+       SUM(CAST(a.amount AS HUGEINT)) AS musu_taken
+FROM kami_action a JOIN kami_static s USING (kami_id)
+WHERE a.action_type = 'harvest_liquidate'
+  AND a.block_timestamp > now() - INTERVAL 7 DAY
+GROUP BY 1
+ORDER BY musu_taken DESC NULLS LAST
+LIMIT 20;
+
+-- Operator-level MUSU intake (gross): which wallets are draining
+-- the most MUSU on a chain-wide basis?
+SELECT from_addr,
+       COUNT(*) FILTER (WHERE action_type = 'harvest_stop') AS stops,
+       SUM(CAST(amount AS HUGEINT)) AS musu_gross
+FROM kami_action
+WHERE action_type IN ('harvest_collect', 'harvest_stop')
+  AND amount IS NOT NULL
+  AND block_timestamp > now() - INTERVAL 7 DAY
+GROUP BY 1
+ORDER BY musu_gross DESC
+LIMIT 20;
+```
+
+**Caveats**:
+- `amount` is **gross** (drained from the harvest entity). The
+  operator's own MUSU balance only goes up by `gross × (1 − tax)`;
+  the rest goes to the taxer wallet configured in
+  `harvest_start.taxAmt`. The standard rate is 6%, but some nodes
+  configure 12% or 100%.
+- `harvest_start.amount` is always NULL (no payout on start).
+- ~18.7% of `harvest_stop` rows have `amount = NULL` — these are
+  no-op stops on already-stopped harvests (a real on-chain bot
+  retry pattern, not a decoder gap). `SUM(...)` ignores NULLs, so
+  the leaderboard queries above behave correctly.
