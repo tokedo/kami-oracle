@@ -19,7 +19,7 @@ from .decoder import DecodedAction
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 @dataclass
@@ -68,6 +68,35 @@ class Storage:
     def bootstrap(self, schema_sql: str) -> None:
         with self.lock:
             self.conn.execute(schema_sql)
+            self._apply_migrations()
+
+    def _apply_migrations(self) -> None:
+        """Run any pending schema migrations under ``self.lock``.
+
+        Each migration is idempotent and bumps ``ingest_cursor.schema_version``
+        on success. Boot order: schema.sql (CREATE IF NOT EXISTS) first, then
+        migrations to ALTER existing tables for installs that pre-date a
+        column.
+        """
+        import importlib.util
+
+        cur = self.conn.execute(
+            "SELECT schema_version FROM ingest_cursor WHERE id = 1"
+        ).fetchone()
+        version = int(cur[0]) if cur and cur[0] is not None else 0
+
+        repo_root = Path(__file__).resolve().parent.parent
+        m002_path = repo_root / "migrations" / "002_add_harvest_id_column.py"
+        spec = importlib.util.spec_from_file_location("migration_002", m002_path)
+        m002 = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m002)
+
+        # m002 is idempotent — safe to run on a fresh install where the
+        # column was already created by schema.sql.
+        if version < m002.TARGET_SCHEMA_VERSION:
+            log.info("storage: applying migration 002 (add harvest_id)")
+            stats = m002.run(self.conn)
+            log.info("storage: migration 002 complete: %s", stats)
 
     # ------------------------------------------------------------------
     # Cursor.
@@ -178,6 +207,7 @@ class Storage:
                 a.node_id,
                 a.amount,
                 a.item_index,
+                a.harvest_id,
                 a.metadata_json(),
                 a.status,
             )
@@ -191,8 +221,8 @@ class Storage:
                 INSERT INTO kami_action
                     (id, tx_hash, sub_index, block_number, block_timestamp,
                      action_type, system_id, from_addr, kami_id, target_kami_id,
-                     node_id, amount, item_index, metadata_json, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     node_id, amount, item_index, harvest_id, metadata_json, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (id) DO NOTHING
                 """,
                 rows,

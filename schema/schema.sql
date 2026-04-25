@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS kami_action (
     node_id           VARCHAR,                   -- harvest node, as decimal string
     amount            VARCHAR,                   -- uint256 as decimal string (generic)
     item_index        INTEGER,                   -- for item_use / equip
+    harvest_id        VARCHAR,                   -- entity id (uint256 decimal) for harvest_*
     metadata_json     VARCHAR,                   -- JSON blob for action-specific args
     status            INTEGER      NOT NULL
 );
@@ -59,6 +60,7 @@ CREATE INDEX IF NOT EXISTS idx_kami_action_kami_ts     ON kami_action(kami_id, b
 CREATE INDEX IF NOT EXISTS idx_kami_action_type_ts     ON kami_action(action_type, block_timestamp);
 CREATE INDEX IF NOT EXISTS idx_kami_action_from_ts     ON kami_action(from_addr, block_timestamp);
 CREATE INDEX IF NOT EXISTS idx_kami_action_block       ON kami_action(block_number);
+CREATE INDEX IF NOT EXISTS idx_kami_action_harvest_id  ON kami_action(harvest_id);
 
 -- ---------------------------------------------------------------------------
 -- kami_static: per-kami traits. Populated lazily from the GetterSystem
