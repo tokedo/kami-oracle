@@ -761,3 +761,112 @@ next session:
 Recommended for Session 7: do (1). It's the smallest delta that makes
 the founder's golden query work end-to-end, and the same plumbing
 unlocks MUSU-based metrics for `kami-zero`'s perception loop.
+
+# Session 7 — MUSU Transfer probe (correcting Session 6's hand-off)
+
+Date: 2026-04-25.
+Vendor SHA: `332db78` (kami_context/UPSTREAM_SHA).
+
+## Correction — MUSU is NOT an ERC-20
+
+The Session 6 hand-off (`memory/decoder-notes.md` "Session 6 MUSU
+gap" and `memory/questions-for-human.md`) named
+`0xE1Ff7038eAAAF027031688E1535a055B2Bac2546` as the MUSU token
+contract. Per the vendored `kami_context/chain.md` (sha 332db78,
+"Currencies: Native ETH vs WETH vs In-Game Currencies" table and the
+"$MUSU (In-Game Currency)" section starting at line 168):
+
+- `0xE1Ff7038eAAAF027031688E1535a055B2Bac2546` is **WETH** — the
+  ERC-20 wrapper around bridged ETH. Used for marketplace approvals.
+- $MUSU is the in-game currency item index 1, **not** an ERC-20
+  token. It "exists only as an in-game inventory item" and "cannot be
+  transferred on-chain as a token."
+
+Confirmed empirically against tx
+`0x59ecb09fa31053e00115086ccbb0a1ac8b5285a5930fa81793ed3d1a78820e97`
+(harvest_collect for kami `Disco Wrench`, owner `bD8DDEF...`):
+
+- 24 logs total. Two ERC20 `Transfer` events at
+  `0xE1Ff7038e...` (WETH), values `8.498e-6 ETH` and `2.211e-6 ETH`.
+  These are operator gas/fee accounting, not the harvest payout —
+  too small by orders of magnitude.
+- 21 `ComponentValueSet` events emitted by the World contract
+  (`0x2729174c265dbBd8416C6449E0E813E88f43D0E7`).
+
+So the original Session 7 plan ("decode ERC-20 Transfer at MUSU
+token contract") would have produced the wrong number entirely.
+
+## How MUSU actually flows
+
+MUSU is a `ValueComponent` (`component.value`,
+`componentId = uint256(keccak256("component.value")) =
+80678919686888423251211770875952264544944593537285580074425903087691541684961`)
+balance keyed by the entity id
+`keccak256(abi.encodePacked("inventory.instance", uint256 accountId,
+uint32 1))` (from `kami_context/system-ids.md` "Reading Inventory
+Balance"). The harvest entity (`harvest_id`) holds the *unclaimed
+accrued bounty* on its own ValueComponent slot.
+
+When `system.harvest.collect` / `system.harvest.stop` /
+`system.harvest.liquidate` runs, the World emits, in order:
+
+1. `ComponentValueSet(component.value, ..., harvest_id, NEW_BOUNTY)`
+   — the system first writes the freshly-computed accrued amount to
+   the harvest entity (e.g. `1001`).
+2. The harvest entity's value is drained: another
+   `ComponentValueSet(component.value, ..., harvest_id, 0)`.
+3. The operator's MUSU inventory entity gets a single
+   `ComponentValueSet(component.value, ..., MUSU_INV_ID, NEW_TOTAL)`
+   — only the post-credit balance, not the delta.
+
+So the *gross* MUSU drained by the action is recoverable by walking
+the `component.value` writes to the action's `harvest_id` and taking
+the **maximum** value (or equivalently the value of the first write,
+since the second write is always 0). No prior-state read is needed.
+
+Validated on three sample txs (operator-match column shows whether
+the row's `from_addr` equals the inventory owner's operator wallet
+in `kami_static`):
+
+| action_type        | tx                  | harvest_id (truncated) | writes                | bounty | operator-match |
+|--------------------|---------------------|-------------------------|-----------------------|-------:|----------------|
+| harvest_collect    | 0x59ecb09fa31053e0… | 81194157677…498971494   | [(1, 1001), (6, 0)]   | 1001   | ✓ (Disco Wrench, bD8DD…) |
+| harvest_stop       | 0x5a70106cf5a2f78…  | 100452166037…198665274  | [(1, 717), (6, 0), (11, 0)] | 717 | ✓ |
+| harvest_stop       | 0xc22a56ac99d1299…  | 13653922722…785349258   | [(1, 218), (6, 0), (11, 0)] | 218 | ✓ |
+| harvest_liquidate  | 0x5ae7117967817d7…  | 12266280309…377863975   | [(4, 812), (27, 0)]   | 812    | n/a (liquidator's MUSU goes to attacker) |
+| harvest_start      | 0x3c9f353879d08ee…  | 47042844534…045255825   | []                    | NULL   | (no payout) |
+
+`harvest_start` correctly emits no `ValueComponent` writes to the
+harvest entity (the harvest record's value starts at 0 and is set on
+first `start`/`stop`/`collect`). So `harvest_start.amount` stays
+NULL by design.
+
+## Decoder strategy
+
+For each `harvest_collect` / `harvest_stop` / `harvest_liquidate`
+row in a tx receipt:
+
+1. Look up the row's `harvest_id`. For 99.7% of historical
+   `harvest_liquidate` rows the column is NULL but
+   `metadata_json.victim_harvest_id` is populated. Fall back to that
+   when needed (Session 7 doesn't backfill the column itself — out
+   of scope).
+2. Walk `receipt.logs`. Filter on:
+   - `address == World (0x2729174c265dbBd8416C6449E0E813E88f43D0E7)`
+   - `topics[0] == keccak256("ComponentValueSet(uint256,address,uint256,bytes)")`
+   - `uint256(topics[1]) == component.value componentId`
+   - `uint256(topics[3]) == row.harvest_id`
+   - `data` ABI-decodes to a 32-byte uint256
+3. The row's `amount` is the **max** of those uint256 values. If
+   no matching write is found, leave NULL and log.
+
+This avoids the prompt's tx-index/log-index pairing scheme entirely
+because we have a direct foreign key (`harvest_id`) from the action
+row to the receipt event.
+
+## Why no scaling
+
+MUSU is a plain integer (in-game item count). No 1e18 divisor at the
+SQL layer — the column just holds the integer string. The founder's
+golden query examples that say `CAST(amount AS HUGEINT) / 1e18`
+should be `CAST(amount AS HUGEINT)`.
