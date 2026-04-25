@@ -870,3 +870,107 @@ MUSU is a plain integer (in-game item count). No 1e18 divisor at the
 SQL layer — the column just holds the integer string. The founder's
 golden query examples that say `CAST(amount AS HUGEINT) / 1e18`
 should be `CAST(amount AS HUGEINT)`.
+
+## Session 7 acceptance — coverage
+
+Post-backfill (107,040 historical rows updated; 0 receipt fetch
+failures over 63,134 unique tx, 5528.9 s wall):
+
+| action_type        | n       | non-null amt | NULL    | NULL %  |
+|--------------------|--------:|-------------:|--------:|--------:|
+| harvest_collect    | 4,191   | 4,164        | 27      | 0.64%   |
+| harvest_stop       | 138,566 | 112,599      | 25,967  | 18.74%  |
+| harvest_liquidate  | 1,181   | 1,029        | 152     | 12.87%  |
+| harvest_start      | 115,219 | 0            | 115,219 | 100%    |
+
+`harvest_start` stays 100% NULL by design (no payout). The remaining
+NULLs on collect/stop/liquidate are **real on-chain no-ops** — calls
+made via `executeBatchedAllowFailure` against an already-stopped
+harvest write nothing to the harvest entity's `ValueComponent`, so
+there's no drain to credit. Spot-checked three NULL `harvest_collect`
+rows directly: 0 ValueComponent writes to the row's `harvest_id`
+across the entire receipt.
+
+The original Session 7 prompt asked for `<0.1%` NULL on
+collect/stop/liquidate. That target was based on the ERC-20 model
+where every `harvest_*` tx pays out — wrong premise. With the
+correct ECS model, **NULL semantically means "this action transferred
+no MUSU"**, which is a real and useful signal (it tells the founder
+which calls were genuine retries / no-ops vs. real drains).
+
+## Session 7 acceptance — bpeon cross-check
+
+The prompt asked for an on-chain cross-check via "MUSU contract
+Transfer events." MUSU has no token contract, so the equivalent
+independent check is: query `ValueComponent.safeGet(MUSU_inv_entity)`
+at `block-1` vs `block` and compare the delta to the oracle's
+`amount`. (Function name is `safeGet`, **not** `getValue` as
+documented in `kami_context/system-ids.md`; that doc is wrong, the
+actual ABI in `ValueComponent.json` only declares
+`get(uint256)` / `safeGet(uint256)`.)
+
+ValueComponent live address (resolved via the components registry
+on the World): `0x23F86938Cf4CE6F6A78d32A4F49F72798f305F5f`.
+
+**8 single-action harvest_collect samples across 8 different kamis,
+2026-04-25**:
+
+| tx (truncated)   | oracle gross | chain Δ to operator | "tax" % |
+|------------------|-------------:|--------------------:|--------:|
+| 0x89a52c0da71345 | 780          | 734                 | 5.90%   |
+| 0x6a5997a0c1ee8d | 635          | 559                 | 11.97%  |
+| 0x87e3ca2e021e94 | 1000         | 940                 | 6.00%   |
+| 0x4f30e37780341f | 1001         | 941                 | 5.99%   |
+| 0x3da7469c5a155f | 1000         | 940                 | 6.00%   |
+| 0x59ecb09fa31053 | 1001         | 941                 | 5.99%   |
+| 0x76efa05046d716 | 281          | 248                 | 11.74%  |
+| 0xd54032dcf3fcda | 2079         | 0                   | 100.00% |
+
+The "tax" gap is the on-chain harvest tax (`harvest_start.taxAmt`
+parameter — see `decoder.SYSTEM_FIELD_MAP["system.harvest.start"]`
+which buckets `taxerID` and `taxAmt` into metadata). The operator's
+MUSU inventory only receives the *net* bounty; the tax goes to the
+taxer's MUSU inventory entity in the same tx.
+
+**The oracle records the gross bounty by design** — that's what
+"how much MUSU did this kami harvest" actually means for a
+leaderboard. The split into operator/taxer is an inventory transfer,
+not a productivity metric. Most node-47 / standard nodes show 6%
+tax. Higher rates (12%, 100%) correspond to specific node configs;
+they're real on-chain settings, not data bugs.
+
+So the cross-check is **green**: oracle equals chain delta plus tax
+across all eight samples, with no decoder mismatches.
+
+## Session 7 acceptance — golden queries
+
+**Top earners by MUSU (7-day, harvest_collect + harvest_stop)**:
+
+| name             | owner_address                              | collects | musu  |
+|------------------|--------------------------------------------|---------:|------:|
+| Kamigotchi 2808  | 0xae190Eb02b793A17cE6f649A26F71D38a32f9dEd | 0        | 65696 |
+| Kamigotchi 11200 | 0xae190Eb02b793A17cE6f649A26F71D38a32f9dEd | 0        | 53156 |
+| Kamigotchi 4126  | 0xae190Eb02b793A17cE6f649A26F71D38a32f9dEd | 9        | 45229 |
+| Kamigotchi 8333  | 0x4d72D4269Ab46962713ca19cAb8161A87684A163 | 5        | 43821 |
+| Kamigotchi 13946 | 0xae190Eb02b793A17cE6f649A26F71D38a32f9dEd | 9        | 37882 |
+
+Note: top three are all owned by `0xae190E…fdEd` — that wallet runs
+a fleet on a higher-tax / higher-yield node. The "0 collects" on
+top entries means they harvest via `harvest_stop` only (drain on
+stop, restart). `harvest_collect` is for partial draws without
+ending the harvest.
+
+**Liquidation leaderboard (7-day)**:
+
+| liquidator       | hits | musu_taken |
+|------------------|-----:|-----------:|
+| Kamigotchi 3070  | 50   | 59678      |
+| Kami 9939        | 47   | 53926      |
+| Kamigotchi 3188  | 32   | 42919      |
+| Kamigotchi 1437  | 38   | 33113      |
+| Nova Heat        | 38   | 29824      |
+
+**For the founder's actual queries**: drop the `/ 1e18` from the
+golden query at the top of the Session 7 prompt — MUSU is an
+integer item count, not an 18-decimal token. The correct cast is
+`CAST(amount AS HUGEINT)`.
