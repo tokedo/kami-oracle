@@ -55,6 +55,19 @@ db/kami-oracle.duckdb   (rolling 28 days, Stage 1)
   as the chain is ingested). Bounded DB, signal fresh to the
   current meta.
 
+## Operator labels in `kami_static` (Session 9)
+
+Every `kami_static` row carries the in-game **Account** that owns
+the kami via two columns: `account_index` (the small 1..N ordinal)
+and `account_name` (the human display name — "bpeon",
+"ray charles"). Both come from `GetterSystem.getAccount(accountId)`
+and are refreshed on the same cadence as the rest of `kami_static`.
+For kami-centric queries that join through `kami_static`, prefer
+`account_name` as the operator label. The `owner_address` column is
+still the canonical EOA wallet; `kami_action.from_addr` is the
+*signer* (often a kamibots automation key, which can differ from
+the owning account under automation).
+
 ## MUSU semantics (read once)
 
 `kami_action.amount` is **gross MUSU pre-tax** — the integer

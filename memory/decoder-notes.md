@@ -1021,3 +1021,72 @@ ending the harvest.
 golden query at the top of the Session 7 prompt — MUSU is an
 integer item count, not an 18-decimal token. The correct cast is
 `CAST(amount AS HUGEINT)`.
+
+## Session 9 — account fetch (account_index, account_name)
+
+Added two columns to `kami_static`: `account_index` (small 1..N
+ordinal, mirrors `kami_index`) and `account_name` (human display
+name like "bpeon", "ray charles"). Both come from
+`GetterSystem.getAccount(uint256 accountId)` — already documented in
+`kami_context/system-ids.md` Getter System section but missing from
+the vendored `GetterSystem.json` ABI (Tier-A overlay territory; the
+populator merges a doc-cited fragment in at construction time).
+
+Call shape:
+
+```solidity
+function getAccount(uint256 accountId) view returns (
+  tuple(
+    uint32 index,
+    string name,
+    int32 currStamina,
+    uint32 room
+  )
+)
+```
+
+We persist `index` and `name` only; `currStamina` and `room` are
+ephemeral and would just churn `last_refreshed_ts` if we tracked
+them in `kami_static`.
+
+**Coverage post-backfill (2026-04-26):**
+
+| metric                              | value |
+|-------------------------------------|------:|
+| kami_static rows total              | 6,923 |
+| distinct account_id (non-zero)      |   146 |
+| rows with account_name populated    | 6,923 (100.0%) |
+| accounts with account_name populated|   146 (100.0%) |
+| accounts that came back anonymous   |     0 |
+
+100% coverage is unusual — it means every owning account in our
+window has called `system.account.set.name` at some point. Future
+windows may legitimately surface anonymous accounts (NULL
+`account_name`); the populator handles that gracefully and the
+schema comment block calls it out.
+
+**Bpeon cross-check (founder validator)**: 20 kamis come back with
+`account_name = 'bpeon'`. `kami_index` values:
+
+```
+43, 1064, 2553, 3874, 3983, 6096, 7722, 7803, 8745, 10011,
+10647, 11716, 12459, 13235, 13390, 13702, 13857, 13947, 14286, 14306
+```
+
+(Including kami #43 "Zephyr" — the only named one of the fleet;
+the rest carry default "Kamigotchi N" labels.)
+
+**Within-pass cache.** The populator's `KamiStaticReader` caches
+`getAccount` results by `account_id` for the lifetime of one
+`backfill_all` / `refresh_stale` pass. With 146 unique accounts
+across 6,923 kamis, the cache cuts chain calls by ~47×. The cache
+also memoises *failures* — a reverting account stays cached as
+`(None, None)` for the rest of the pass instead of re-hitting the
+RPC each time.
+
+**Operator name vs signer wallet.** `account_name` in `kami_static`
+is the in-game Account display name. `kami_action.from_addr` is the
+signer EOA (often a kamibots automation key, e.g.
+`0x86aDb8…cEC2`). They coincide for accounts that operate manually
+but diverge under automation. Use `account_name` for kami-centric
+labels and `from_addr` only when filtering by signer.
