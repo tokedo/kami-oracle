@@ -50,6 +50,8 @@ class KamiStatic:
     name: str | None
     owner_address: str | None
     account_id: str | None
+    account_index: int | None
+    account_name: str | None
     body: int | None
     hand: int | None
     face: int | None
@@ -60,6 +62,30 @@ class KamiStatic:
     base_power: int | None
     base_harmony: int | None
     base_violence: int | None
+
+
+# GetterSystem.getAccount(uint256) is documented in
+# kami_context/system-ids.md (Getter System section) but missing from the
+# vendored GetterSystem.json ABI. We merge this minimal fragment into the
+# loaded ABI at construction time so the contract object exposes the
+# function. Tier-A overlay per CLAUDE.md (doc-cited).
+_GET_ACCOUNT_ABI_FRAGMENT: dict = {
+    "name": "getAccount",
+    "type": "function",
+    "stateMutability": "view",
+    "inputs": [{"name": "accountId", "type": "uint256"}],
+    "outputs": [
+        {
+            "type": "tuple",
+            "components": [
+                {"name": "index", "type": "uint32"},
+                {"name": "name", "type": "string"},
+                {"name": "currStamina", "type": "int32"},
+                {"name": "room", "type": "uint32"},
+            ],
+        },
+    ],
+}
 
 
 def _account_id_to_address(account_id_int: int) -> str:
@@ -91,6 +117,8 @@ def _kami_shape_to_static(kami_id: str, shape: tuple) -> KamiStatic:
         name=str(name) if name else None,
         owner_address=owner,
         account_id=str(account_int),
+        account_index=None,
+        account_name=None,
         body=int(body),
         hand=int(hand),
         face=int(face),
@@ -110,6 +138,11 @@ class KamiStaticReader:
     Constructed once at startup; reuses a single ``ChainClient``. eth_call
     failures (revert, timeout) bubble up to the caller — backfill / refresh
     handles them, logs, and skips that kami.
+
+    Account lookups (`getAccount`) are cached on the reader instance so a
+    population pass across many kamis sharing one operator (e.g. bpeon
+    owns dozens) makes one chain call per distinct ``account_id``, not
+    one per kami.
     """
 
     def __init__(self, client: ChainClient, registry: SystemRegistry, abi_dir):
@@ -120,15 +153,53 @@ class KamiStaticReader:
                 "system.getter not in registry — add to SYSTEM_ID_TO_ABI and re-resolve"
             )
         abi = load_abi(abi_dir, info.abi_name)
+        # Merge the doc-cited getAccount fragment in; vendored ABI does not
+        # carry it. Avoid duplicating if a future re-vendor adds it.
+        if not any(e.get("name") == "getAccount" for e in abi if isinstance(e, dict)):
+            abi = list(abi) + [_GET_ACCOUNT_ABI_FRAGMENT]
         self.contract = client.w3.eth.contract(
             address=Web3.to_checksum_address(info.address),
             abi=abi,
         )
+        self._account_cache: dict[str, tuple[int | None, str | None]] = {}
 
     def fetch(self, kami_id: str) -> KamiStatic:
         kid_int = int(kami_id)
         shape = self.client.call_contract_fn(self.contract, "getKami", kid_int)
-        return _kami_shape_to_static(kami_id, shape)
+        row = _kami_shape_to_static(kami_id, shape)
+        if row.account_id is not None and row.account_id != "0":
+            idx, name = self.fetch_account(row.account_id)
+            row.account_index = idx
+            row.account_name = name
+        return row
+
+    def fetch_account(self, account_id: str) -> tuple[int | None, str | None]:
+        """Look up (account_index, account_name) for a uint256 account id.
+
+        Returns (None, None) if the account doesn't resolve cleanly: a
+        revert, a default/empty shape, or an empty name string. Caches
+        results on the reader instance so repeat calls within a population
+        pass are free.
+        """
+        cached = self._account_cache.get(account_id)
+        if cached is not None:
+            return cached
+        result: tuple[int | None, str | None]
+        try:
+            shape = self.client.call_contract_fn(
+                self.contract, "getAccount", int(account_id)
+            )
+        except Exception as e:  # noqa: BLE001
+            # getAccount on a non-account entity reverts; treat as anonymous.
+            log.debug("kami_static: getAccount(%s) failed: %s", account_id, e)
+            result = (None, None)
+        else:
+            idx, name, _stamina, _room = shape
+            idx = int(idx) if idx is not None else None
+            name = str(name) if name else None
+            result = (idx, name)
+        self._account_cache[account_id] = result
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +215,7 @@ def upsert_kami_static(storage: Storage, rows: Iterable[KamiStatic]) -> int:
     payload = [
         (
             r.kami_id, r.kami_index, r.name, r.owner_address, r.account_id,
+            r.account_index, r.account_name,
             r.body, r.hand, r.face, r.background, r.color,
             json.dumps(r.affinities) if r.affinities is not None else None,
             r.base_health, r.base_power, r.base_harmony, r.base_violence,
@@ -156,15 +228,18 @@ def upsert_kami_static(storage: Storage, rows: Iterable[KamiStatic]) -> int:
             """
             INSERT INTO kami_static
                 (kami_id, kami_index, name, owner_address, account_id,
+                 account_index, account_name,
                  body, hand, face, background, color, affinities,
                  base_health, base_power, base_harmony, base_violence,
                  first_seen_ts, last_refreshed_ts)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (kami_id) DO UPDATE SET
                 kami_index = excluded.kami_index,
                 name = excluded.name,
                 owner_address = excluded.owner_address,
                 account_id = excluded.account_id,
+                account_index = excluded.account_index,
+                account_name = excluded.account_name,
                 body = excluded.body,
                 hand = excluded.hand,
                 face = excluded.face,

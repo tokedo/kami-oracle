@@ -88,6 +88,15 @@ CREATE TABLE IF NOT EXISTS kami_static (
     name              VARCHAR,
     owner_address     VARCHAR,
     account_id        VARCHAR,
+    -- account_index, account_name: the in-game Account that owns this
+    -- kami. account_name is the user-chosen display name (e.g.
+    -- "bpeon"); account_index is the small 1..N ordinal. Both come
+    -- from GetterSystem.getAccount(accountId). NULL if the account
+    -- has not been hydrated yet, or if getAccount returns a default
+    -- (anonymous) shape. The owner_address is still the canonical EOA
+    -- wallet — account_name is the human label.
+    account_index     INTEGER,
+    account_name      VARCHAR,
     body              INTEGER,
     hand              INTEGER,
     face              INTEGER,

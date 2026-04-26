@@ -19,7 +19,7 @@ from .decoder import DecodedAction
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 @dataclass
@@ -86,17 +86,27 @@ class Storage:
         version = int(cur[0]) if cur and cur[0] is not None else 0
 
         repo_root = Path(__file__).resolve().parent.parent
-        m002_path = repo_root / "migrations" / "002_add_harvest_id_column.py"
-        spec = importlib.util.spec_from_file_location("migration_002", m002_path)
-        m002 = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(m002)
 
-        # m002 is idempotent — safe to run on a fresh install where the
-        # column was already created by schema.sql.
+        def _load(rel: str, mod_name: str):
+            spec = importlib.util.spec_from_file_location(mod_name, repo_root / rel)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+
+        m002 = _load("migrations/002_add_harvest_id_column.py", "migration_002")
+        m003 = _load("migrations/003_add_account_name_columns.py", "migration_003")
+
+        # Each migration is idempotent — safe to run on a fresh install where
+        # the columns may already exist via schema.sql.
         if version < m002.TARGET_SCHEMA_VERSION:
             log.info("storage: applying migration 002 (add harvest_id)")
             stats = m002.run(self.conn)
             log.info("storage: migration 002 complete: %s", stats)
+
+        if version < m003.TARGET_SCHEMA_VERSION:
+            log.info("storage: applying migration 003 (add account_index, account_name)")
+            stats = m003.run(self.conn)
+            log.info("storage: migration 003 complete: %s", stats)
 
     # ------------------------------------------------------------------
     # Cursor.
