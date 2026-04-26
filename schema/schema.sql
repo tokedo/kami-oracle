@@ -49,6 +49,20 @@ CREATE TABLE IF NOT EXISTS kami_action (
     kami_id           VARCHAR,                   -- uint256 as decimal string (nullable)
     target_kami_id    VARCHAR,                   -- for PvP / trade targets
     node_id           VARCHAR,                   -- harvest node, as decimal string
+    -- amount: GROSS MUSU drained from the harvest entity. Integer
+    -- item-count (item index 1 = MUSU); do NOT divide by 1e18.
+    -- For harvest_collect / harvest_stop / harvest_liquidate this is
+    -- the full amount removed from the harvest before the on-chain
+    -- tax split. The operator's MUSU inventory receives
+    --   amount - (amount * harvest_start.taxAmt / 1e4)
+    -- with the remainder credited to the node's taxer entity.
+    -- For kami leaderboards / productivity comparisons, ALWAYS use
+    -- this column (gross). Tax is a node-config artifact, not a
+    -- kami stat — using net would invert rankings for kamis on
+    -- higher-tax nodes. For operator-side economics, derive net by
+    -- joining to the matching harvest_start row's metadata_json.
+    -- See memory/decoder-notes.md "Session 7 — bpeon cross-check"
+    -- for the derivation.
     amount            VARCHAR,                   -- uint256 as decimal string (generic)
     item_index        INTEGER,                   -- for item_use / equip
     harvest_id        VARCHAR,                   -- entity id (uint256 decimal) for harvest_*
