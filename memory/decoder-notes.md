@@ -1,3 +1,50 @@
+# Decoder notes
+
+## MUSU semantics — gross vs net (Session 8 promotion)
+
+This was scattered across "Session 7 — bpeon cross-check" and the
+schema; pulled up here so future sessions don't have to dig.
+
+**`kami_action.amount` is gross MUSU pre-tax.** Gross = the integer
+item-count drained from the harvest entity *before* the on-chain tax
+split. The decoder records it from the World's `ComponentValueSet`
+write to the harvest entity (see "Session 7 — MUSU Transfer probe"
+for the receipt-walk).
+
+**Always use gross for kami leaderboards / productivity comparisons.**
+A medium kami on a 0%-tax node and a strong kami on a 12%-tax node
+would invert in *net* rankings even though productivity is identical.
+Tax is a node-config artifact, not a kami stat.
+
+**Net is operator economics, not kami productivity.** When operator
+inventory is what you care about, derive it on the fly:
+
+```
+net = gross - gross * harvest_start.taxAmt / 1e4
+```
+
+`taxAmt` is in basis points and lives in `metadata_json` on the
+matching `harvest_start` row (decoder field map already buckets it
+there — see `decoder.SYSTEM_FIELD_MAP["system.harvest.start"]`).
+Empirically validated against eight bpeon harvest_collect samples in
+the "Session 7 — bpeon cross-check" block below: oracle gross equals
+chain delta to operator + tax to taxer entity in every case.
+
+**No 1e18 scaling.** MUSU is an in-game item index (item index 1),
+not an ERC-20. Cast as `CAST(amount AS HUGEINT)` in raw SQL.
+
+NULL on `harvest_collect` / `harvest_stop` / `harvest_liquidate`
+means "this on-chain action transferred no MUSU" — typically a no-op
+via `executeBatchedAllowFailure` against an already-stopped harvest.
+NULL is a real, useful signal, not a decoder gap.
+
+The client library (`client/`) renames the field to `musu_gross` in
+its dataclasses to enforce this naming clarity at the consumer
+layer. The wire protocol still calls it `amount` so the Colab
+notebook keeps working.
+
+---
+
 # Decoder notes — Session 1 findings
 
 Date: 2026-04-17 (session 1)

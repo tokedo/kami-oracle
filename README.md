@@ -13,8 +13,8 @@ Every action every kami takes — harvest start/stop, feed, rest, move,
 level-up, skill allocation, equip, liquidate, quest, trade, item
 craft — is permanently recorded on Yominet. kami-oracle continuously
 tails the chain, decodes these txs against the Kamigotchi System
-ABIs, and maintains a rolling window (Stage 1: 1 week, may extend to
-28 days later) of all kami activity in a local DuckDB database.
+ABIs, and maintains a rolling 28-day window of all kami activity in a
+local DuckDB database.
 
 Downstream phases will unlock questions like:
 
@@ -33,7 +33,7 @@ Yominet RPC (public)
 ingester/   (continuous tail, tx-level decode, idempotent upsert)
     │
     ▼
-db/kami-oracle.duckdb   (rolling 1 week, Stage 1)
+db/kami-oracle.duckdb   (rolling 28 days, Stage 1)
     │
     ▼
 (future, Phase D) MCP server  →  playing agents
@@ -50,9 +50,23 @@ db/kami-oracle.duckdb   (rolling 1 week, Stage 1)
 - **Open source, no moat.** The repo is MIT. The data it reads is
   public. Anyone can run their own instance.
 - **Read-only.** Oracle cannot influence the game.
-- **Rolling window, not full history.** Stage 1 runs at 1 week (while
-  we clean up what's being collected; may extend to 28 days later).
-  Bounded DB, signal fresh to the current meta.
+- **Rolling window, not full history.** Stage 1 runs at 28 days
+  (extended from 7 in Session 8; the window fills in over ~3 weeks
+  as the chain is ingested). Bounded DB, signal fresh to the
+  current meta.
+
+## MUSU semantics (read once)
+
+`kami_action.amount` is **gross MUSU pre-tax** — the integer
+item-count drained from the harvest entity *before* the on-chain tax
+split. Always use gross for kami comparisons; tax varies by node
+(0%, 6%, 12%, sometimes higher) and would distort productivity
+rankings if folded in. Cast as `CAST(amount AS HUGEINT)` — never
+divide by 1e18 (MUSU is an integer item index, not a token). For
+operator-side economics, derive net by joining the matching
+`harvest_start` row's `metadata.taxAmt`:
+`net = gross - gross * taxAmt / 1e4`. Full derivation in
+`memory/decoder-notes.md` under "MUSU semantics".
 
 ## Running your own instance
 
