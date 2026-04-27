@@ -1404,3 +1404,32 @@ from Session 10's already-fetched `skills_json` and
 at populator startup. The "+30–60 min on the daily sweep"
 estimate in the Session 11 prompt was conservative — actual added
 cost is ~seconds (catalog load + per-kami arithmetic).
+
+## Session 12 — affinities
+
+`getKami(kamiId).affinities` is a fixed-length 2-element string array
+drawn from `{EERIE, NORMAL, SCRAP, INSECT}` (uppercase on chain). The
+canonical ordering, per `kamigotchi-context/systems/state-reading.md`
+line 101 (`kami.affinities // string[] — e.g. ["EERIE", "SCRAP"]
+(body, hand)`), is:
+
+- `affinities[0]` = body affinity
+- `affinities[1]` = hand affinity
+
+Verified live at block 28,147,942 against three kamis with distinct
+body indices (Zephyr #43 / `['NORMAL', 'EERIE']`, kami #5121 body=11 /
+`['EERIE', 'EERIE']`, kami #12404 body=0 / `['SCRAP', 'EERIE']`).
+Element 0 always corresponds to the kami's body affinity and element
+1 to its hand. Stored verbatim into `body_affinity` / `hand_affinity`
+columns — the populator does not normalize case or remap values, so
+downstream queries should match the on-chain casing (currently all
+uppercase). Zero new chain calls: the same `getKami` call already
+populates the JSON `affinities` column, level/xp, base + total stats,
+slots/skills/equipment. Splitting into two scalar columns is purely
+for query ergonomics so kami-agent can `GROUP BY body_affinity`
+instead of parsing JSON in-line.
+
+The integer `body` / `hand` columns (trait indices, ~30 distinct
+bodies / ~27 distinct hands) remain unchanged. The body/hand→affinity
+mapping is many-to-one and the columns coexist: integer for the
+specific trait pose, string for the affinity bucket.

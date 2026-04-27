@@ -1,0 +1,50 @@
+Session 12 — body_affinity / hand_affinity discovery
+======================================================
+Date: 2026-04-27
+Block height at fetch: 28147942
+Source: GetterSystem.getKami(uint256 kamiId), live Yominet RPC.
+Doc reference: kamigotchi-context/systems/state-reading.md:101 —
+  `kami.affinities // string[] — e.g. ["EERIE", "SCRAP"] (body, hand)`
+
+Element ordering (verified)
+---------------------------
+- affinities[0] = body affinity
+- affinities[1] = hand affinity
+
+Raw chain dumps
+---------------
+
+kami_index=43  name='Zephyr'  (founder bpeon fixture)
+  body_index=14  hand_index=21
+  raw affinities = ['NORMAL', 'EERIE']  (type: list, len=2)
+  affinities[0] (body_affinity) = 'NORMAL'
+  affinities[1] (hand_affinity) = 'EERIE'
+
+kami_index=5121  name='Kamigotchi 5121'
+  body_index=11  hand_index=0
+  raw affinities = ['EERIE', 'EERIE']  (type: list, len=2)
+  affinities[0] (body_affinity) = 'EERIE'
+  affinities[1] (hand_affinity) = 'EERIE'
+
+kami_index=12404  name='Kamigotchi 12404'
+  body_index=0  hand_index=5
+  raw affinities = ['SCRAP', 'EERIE']  (type: list, len=2)
+  affinities[0] (body_affinity) = 'SCRAP'
+  affinities[1] (hand_affinity) = 'EERIE'
+
+Notes
+-----
+- Chain returns UPPERCASE strings drawn from
+  {EERIE, NORMAL, SCRAP, INSECT}. We store verbatim — no lowercasing,
+  no title-casing, no remapping. Founder will adapt downstream queries
+  to whatever case the chain uses.
+- 30 distinct body trait indices, 27 distinct hand trait indices vs.
+  4 affinities — body/hand→affinity is many-to-one. The new columns
+  are denormalized for ergonomics; the integer body/hand columns
+  remain alongside.
+- Sample diversity: bodies 0, 11, 14 all give different affinities
+  (SCRAP, EERIE, NORMAL respectively), confirming body→affinity is a
+  real lookup, not a single-affinity world.
+- The existing `kami_static.affinities` JSON column already carries
+  the same chain data Session 9 fetched. Session 12 splits it into
+  two scalar columns so agents can JOIN/GROUP BY without parsing JSON.
