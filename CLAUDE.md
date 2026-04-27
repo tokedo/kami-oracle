@@ -95,6 +95,14 @@ Canonical definitions live in `schema/schema.sql`. Summary:
   - `defense_threshold_shift` — `DTS`, ×1000
   - `defense_threshold_ratio` — `DTR`, ×1000
   - `defense_salvage_ratio` — `DSR`, ×1000
+  Affinity scalars (Session 12) — extracted from
+  `getKami(kamiId).affinities` (string[2] = `[body, hand]`) on the
+  same daily sweep, stored verbatim from chain (uppercase, drawn
+  from `{EERIE, NORMAL, SCRAP, INSECT}`). The integer `body` / `hand`
+  columns are trait indices and stay alongside; affinity is the
+  elemental bucket and is many-to-one over body/hand traits.
+  - `body_affinity` — VARCHAR, e.g. `"NORMAL"`
+  - `hand_affinity` — VARCHAR, e.g. `"EERIE"`
 - **`ingest_cursor`**: ops state. Last committed block, vendor
   version, schema version.
 

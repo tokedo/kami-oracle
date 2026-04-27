@@ -124,6 +124,22 @@ NOT new columns — they're already folded into `total_health` /
 skill-effect modifiers on chain" for the catalog walk derivation,
 storage convention, and Zephyr round-trip.
 
+## Affinity columns in `kami_static` (Session 12)
+
+Every `kami_static` row now carries the kami's body and hand
+affinities as scalar columns: `body_affinity` and `hand_affinity`,
+both VARCHAR drawn from `{EERIE, NORMAL, SCRAP, INSECT}` (uppercase
+on chain). Extracted from `getKami(kamiId).affinities` (the
+`[body, hand]` 2-string array, per
+`kamigotchi-context/systems/state-reading.md`) on the daily sweep —
+zero new chain calls, the same struct already feeds level/xp/stats.
+Values are stored verbatim; no case normalization. The integer
+`body` / `hand` columns (~30 / ~27 distinct trait indices) remain
+alongside — body→affinity is many-to-one. Use the affinity columns
+when grouping or joining by elemental type; use the integer columns
+for trait-pose specificity. See `memory/decoder-notes.md` "Session 12
+— affinities" for ordering verification and the chain dump.
+
 ## MUSU semantics (read once)
 
 `kami_action.amount` is **gross MUSU pre-tax** — the integer
