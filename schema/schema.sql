@@ -147,6 +147,30 @@ CREATE TABLE IF NOT EXISTS kami_static (
     skills_json       VARCHAR,                  -- JSON array of {index, points}
     equipment_json    VARCHAR,                  -- JSON array of item_index
     build_refreshed_ts TIMESTAMP,
+    -- Skill-effect modifiers (Session 11): the 12 non-stat skill effect
+    -- types from kami_context/systems/leveling.md. Resolved totals as the
+    -- game uses them, summed across skills + equipment + passives. Stored
+    -- at the same precision as on chain — percent values are ×1000 (e.g.
+    -- strain_boost = -200 means -20%); CS is seconds; HIB is Musu/hr.
+    -- Refreshed by the kami_static populator on the daily sweep alongside
+    -- the Session 10 build columns; same build_refreshed_ts marks both.
+    -- The four stat-shift effects (SHS/SPS/SVS/SYS) are NOT new columns —
+    -- they're already folded into total_health/power/violence/harmony via
+    -- getKami(id).stats. See memory/decoder-notes.md "Session 11 —
+    -- skill-effect modifiers on chain" for the catalog-walk derivation
+    -- and Zephyr round-trip.
+    strain_boost              INTEGER,         -- SB,  ×1000 (negative = less strain)
+    harvest_fertility_boost   INTEGER,         -- HFB, ×1000
+    harvest_intensity_boost   INTEGER,         -- HIB, Musu/hr (no ×1000)
+    harvest_bounty_boost      INTEGER,         -- HBB, ×1000
+    rest_recovery_boost       INTEGER,         -- RMB, ×1000
+    cooldown_shift            INTEGER,         -- CS,  seconds (signed; no ×1000)
+    attack_threshold_shift    INTEGER,         -- ATS, ×1000
+    attack_threshold_ratio    INTEGER,         -- ATR, ×1000
+    attack_spoils_ratio       INTEGER,         -- ASR, ×1000
+    defense_threshold_shift   INTEGER,         -- DTS, ×1000
+    defense_threshold_ratio   INTEGER,         -- DTR, ×1000
+    defense_salvage_ratio     INTEGER,         -- DSR, ×1000
     first_seen_ts     TIMESTAMP    NOT NULL,
     last_refreshed_ts TIMESTAMP    NOT NULL
 );
