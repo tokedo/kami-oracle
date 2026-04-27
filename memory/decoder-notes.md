@@ -1090,3 +1090,197 @@ signer EOA (often a kamibots automation key, e.g.
 `0x86aDb8…cEC2`). They coincide for accounts that operate manually
 but diverge under automation. Use `account_name` for kami-centric
 labels and `from_addr` only when filtering by signer.
+
+## Session 10 — build fields on chain
+
+The kami's *current build* (effective stats, level, skills,
+equipment) is the next thing the meta-clustering analysis needs. The
+oracle already has trait images and base stats; this section
+documents what's added to `kami_static` in Session 10 and the
+chain-side sources for each field.
+
+### What's resolved on chain vs. computed
+
+`getKami(uint256 kamiId)` already returns the per-kami stat tuple
+`(base, shift, boost, sync)` for health / power / harmony / violence,
+plus `level` and `xp`. The Session 9 populator throws away `level`
+and `xp` (`_lvl, _xp` in the destructure); Session 10 wires them
+through. The stat tuple already carries every modifier (skill
+shifts, equipment shifts, item boosts) merged in — we don't
+recompute those, we just collapse the four-field stat into the
+canonical effective scalar via the game's documented formula.
+
+**Effective stat formula** (per
+`kamigotchi-context/systems/state-reading.md` and `health.md`,
+identical for all four core stats and slots):
+
+```
+effective = max(0, floor((1000 + boost) * (base + shift) / 1000))
+```
+
+This is the same expression Kamigotchi's own client / state-reading
+docs use, applied to `kami.stats.health`, `kami.stats.power`,
+`kami.stats.harmony`, `kami.stats.violence`. The `sync` field is
+the last-synced *current* depletable HP — it's the runtime value,
+not a build property, so we don't store it on `kami_static`.
+
+### Per-field resolution
+
+| field | source | notes |
+|---|---|---|
+| `level` | `getKami(id).level` | already in tuple, persisted directly |
+| `xp` | `getKami(id).xp` | already in tuple, persisted directly |
+| `total_health` | `getKami(id).stats.health` → formula | effective max HP |
+| `total_power` | `getKami(id).stats.power` → formula | effective Power (combat output, harvest fertility) |
+| `total_harmony` | `getKami(id).stats.harmony` → formula | effective Harmony (strain-resistance, defense floor) |
+| `total_violence` | `getKami(id).stats.violence` → formula | effective Violence (kill threshold, defense ceiling) |
+| `total_slots` | `SlotsComponent.safeGet(id)` → formula | the slots-stat resolved scalar; **in-game capacity = 1 + `total_slots`** (per `equipment.md`, base capacity is implicit 1) |
+| `skills_json` | `IDOwnsSkillComponent.getEntitiesWithValue(id)` → enumerate; per skill, `IndexSkillComponent.safeGet` + `SkillPointComponent.safeGet` | JSON array `[{"index": N, "points": M}, ...]` |
+| `equipment_json` | `IDOwnsEquipmentComponent.getEntitiesWithValue(id)` → enumerate; per equip, `IndexItemComponent.safeGet` | JSON array of item indices `[item_index, ...]`. Slot-name resolution deferred (see below). |
+
+`SlotsComponent`, `IDOwnsSkillComponent`, `IndexSkillComponent`,
+`SkillPointComponent`, `IDOwnsEquipmentComponent`, `IndexItemComponent`
+all resolve via `world.components()` (the components registry) — a
+separate registry from `world.systems()` used by the existing
+`SystemRegistry`. Resolution pattern is identical: keccak256 the
+component name string, call `getEntitiesWithValue(hash)`, low-160
+bits of the returned entity is the component contract address.
+
+Notes on each:
+
+- `total_slots` semantics. The formula above resolves to the
+  slots-stat effective scalar. The in-game equipment capacity (per
+  `kamigotchi-context/systems/equipment.md`) is `1 +
+  EQUIP_CAPACITY_SHIFT bonus`, and `EQUIP_CAPACITY_SHIFT` is the
+  slots-stat shift. Today no skill or item grants slots, so the
+  observed value across the fleet is uniformly 0 (capacity = 1).
+  Stored as the chain value, not as `1 + chain value`, to keep the
+  column shape identical to `total_health` / `total_power` /
+  `total_harmony` / `total_violence` — the "+1" is an interpretation
+  layer the founder's Colab can apply when needed.
+- `skills_json`. The skill catalog (which `index` corresponds to
+  which named skill) lives in `kamigotchi-context/catalogs/skills.csv`
+  — not joined here. Stored as raw indices so a future session can
+  resolve via the catalog without re-reading chain.
+- `equipment_json`. We store **only item indices**, not slot names.
+  `component.for.string` (which would give the slot-name string per
+  equip entity) does not resolve in the current components registry
+  snapshot. Capacity is 1, so most kamis have 0 or 1 equipped — the
+  ergonomic loss is small. Slot names can be added in a future
+  session if a consumer asks.
+
+### Why no separate `attack_threshold` / `defense_threshold`
+
+The Session 10 prompt asked about combat thresholds. In Kamigotchi,
+liquidation viability is determined by the attacker's effective
+Power vs the victim's effective Violence (and the victim's HP
+state). Both are already exposed as `total_power` / `total_violence`
+above — there is no separate "attack threshold" or "defense
+threshold" scalar on chain that isn't a derivation of those two
+plus health. Stage-1 meta clustering uses
+`(total_harmony, total_power, total_violence, level)` as its
+primary feature space; thresholds collapse cleanly into those.
+
+A discrete "can-be-liquidated below X HP" threshold may exist as a
+config value in the `component.value` registry under
+`is.config:LIQUIDATION_*`, but I did not surface a clean,
+kami-specific version of that during discovery and the prompt's
+fallback ("compute from what is on chain, clearly labeled as
+derived") is heavier than Stage-1 needs. Deferred until a consumer
+asks.
+
+### Bpeon fixture cross-check (Zephyr, kami #43)
+
+Raw build dump from `scripts/discover_build_fields.py` against the
+live chain at block 28,141,324:
+
+```
+kami_index = 43
+name       = Zephyr
+account    = 766652271399468889391879684419720168355448418214 (= bpeon)
+level      = 37
+xp         = 136367
+room       = 16
+state      = RESTING
+affinities = ['NORMAL', 'EERIE']
+
+stats — (base, shift, boost, sync) per stat, effective per the formula
+  health    base=  90 shift= 140 boost=   0 sync=  78 -> effective=230
+  power     base=  16 shift=   0 boost=   0 sync=   0 -> effective= 16
+  harmony   base=  11 shift=   8 boost=   0 sync=   0 -> effective= 19
+  violence  base=  17 shift=   0 boost=   0 sync=   0 -> effective= 17
+
+SlotsComponent.safeGet(zephyr) = base=0 shift=0 boost=0 sync=0
+  -> effective=0  (in-game capacity = 1 + 0 = 1)
+
+skills (10 owned, sum points=37 — matches level since 1 SP/level
++ 1 starting = level=37 implies 37 spent post-respec):
+  index=212 points=5
+  index=222 points=5
+  index=223 points=5
+  index=232 points=1
+  index=311 points=5
+  index=312 points=5
+  index=323 points=5
+  index=331 points=1
+  index=322 points=4
+  index=313 points=1
+
+equipment: 0 entities owned (nothing equipped)
+```
+
+The level↔skill-points round-trip (sum of `skills_json[*].points`
+== `level` after a respec) is a useful regression invariant for
+future sessions.
+
+### Components registry resolution (new ingester capability)
+
+The Session 9 system registry resolves system contracts via
+`world.systems()`. Components live in a *parallel* registry at
+`world.components()` — same `getEntitiesWithValue(uint256)` ABI,
+different address. The build populator needs both. Pattern:
+
+```python
+world.components() -> registry_addr  # call once at startup
+ents = registry.getEntitiesWithValue(keccak256("component.X"))
+addr = checksum("0x" + format(ents[0], "040x"))
+```
+
+Resolved addresses observed during Session 10 discovery
+(2026-04-27, head=28,141,324):
+
+| component | address |
+|---|---|
+| world.components() | `0x4d61e6034C6aE2556045186a37885A6F492f96De` |
+| component.stat.slots | `0x574FdC51149Ad37147A6cBB60F2032b88665996F` |
+| component.id.skill.owns | `0xedc5A68961B934e83718C6c8E09EA35944C75a04` |
+| component.index.skill | `0xb23e9cAd4a81100b41B86751Ca1B90F5e755Ab05` |
+| component.skill.point | `0x8Ed89867C0F2864904e9301d9C6E099DBD6c9fd7` |
+| component.id.equipment.owns | `0x091A3408b6b07b503B18d942aA0e73DE2F1D66d6` |
+| component.index.item | `0x40F05C42e3BA119cF9f8F7D82999C294373E599E` |
+| component.for.string | NOT RESOLVED |
+
+Notable: `component.id.equipment.owns` IS in the on-chain
+components registry, even though it's missing from
+`kamigotchi-context/integration/ids/components.json`. That cheat
+sheet is incomplete — trust the registry, not the cheat sheet.
+`component.for.string` (slot-name lookup per equipment entity)
+genuinely does not resolve, so equipment is stored by item-index
+only.
+
+### Cost / cadence
+
+Per-kami chain calls in the build populator:
+
+- 1× `getKami` (already done by Session 9)
+- 1× `SlotsComponent.safeGet`
+- 1× `IDOwnsSkillComponent.getEntitiesWithValue` + 2N for N skills
+- 1× `IDOwnsEquipmentComponent.getEntitiesWithValue` + 1M for M equips
+
+For Zephyr (10 skills, 0 equips): 1 + 1 + 1 + 20 + 1 + 0 = 24 calls.
+At ~150–300 ms / call on the public RPC, single-kami latency
+~3.6 – 7.2 s. With 8 parallel workers, 7,020 kamis → ~50–100 min
+backfill. Daily refresh sweep is the same cost; that's the
+acceptable Stage-1 ceiling. **Event-triggered per-kami refresh on
+`skill_upgrade`/`equip` is deferred to Session 11+** if the daily
+sweep proves too coarse.

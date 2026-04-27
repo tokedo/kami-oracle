@@ -1,0 +1,51 @@
+# Session 10 — build-fields discovery dump
+# kami_id = 28257207240752812050526875800976233322376494609598859084860556459780762796410
+# Yominet head block @ 28141324
+
+World.components() = 0x4d61e6034C6aE2556045186a37885A6F492f96De
+  component.stat.slots                     -> 0x574FdC51149Ad37147A6cBB60F2032b88665996F
+  component.id.skill.owns                  -> 0xedc5A68961B934e83718C6c8E09EA35944C75a04
+  component.index.skill                    -> 0xb23e9cAd4a81100b41B86751Ca1B90F5e755Ab05
+  component.skill.point                    -> 0x8Ed89867C0F2864904e9301d9C6E099DBD6c9fd7
+  component.id.equipment.owns              -> 0x091A3408b6b07b503B18d942aA0e73DE2F1D66d6
+  component.index.item                     -> 0x40F05C42e3BA119cF9f8F7D82999C294373E599E
+  component.for.string                     -> NOT FOUND
+
+GetterSystem = 0x12C0989A259471D89D1bA1BB95043D64DAF97c19
+
+## getKami(28257207240752812050526875800976233322376494609598859084860556459780762796410) — high level
+  kami_index = 43
+  name       = Zephyr
+  account    = 766652271399468889391879684419720168355448418214
+  level      = 37
+  xp         = 136367
+  room       = 16
+  state      = RESTING
+  affinities = ['NORMAL', 'EERIE']
+
+## stats — (base, shift, boost, sync) per stat; effective per kamigotchi-context formula
+  health     base=   90 shift=  140 boost=    0 sync=   78 -> effective=230
+  power      base=   16 shift=    0 boost=    0 sync=    0 -> effective=16
+  harmony    base=   11 shift=    8 boost=    0 sync=    0 -> effective=19
+  violence   base=   17 shift=    0 boost=    0 sync=    0 -> effective=17
+
+## SlotsComponent.safeGet(28257207240752812050526875800976233322376494609598859084860556459780762796410)
+  slots base=0 shift=0 boost=0 sync=0 -> effective=0
+
+## skills — 10 entities owned by kami
+  skill_entity=48320863472649986324311690763308493722785684873338775740717812479650707388955  index=212  points=5
+  skill_entity=25305842361707681410798859310674709711622562710669363158921996489390445900864  index=222  points=5
+  skill_entity=2258629842484437902304590115301245014249525417152666447214262283179604296013  index=223  points=5
+  skill_entity=45575827621261358576944779138621880536063592798889156849010345953730908228562  index=232  points=1
+  skill_entity=112749607371261442827660866455235755199695631377690020936527762200041110122015  index=311  points=5
+  skill_entity=65263113819943462584061055896015796158070572877123729377864618686954228686228  index=312  points=5
+  skill_entity=113845194050906723429457261468214013390469587701707755990640178973393244579629  index=323  points=5
+  skill_entity=48894930684086521947797207696363865480392844354311778000255309488416468300094  index=331  points=1
+  skill_entity=115653154872870194987638051398640347419507667203118113299977761629387291538420  index=322  points=4
+  skill_entity=26290263385120487975313956752290482601027469295759522570249581586230308128314  index=313  points=1
+
+  skills_json = [{"index": 212, "points": 5}, {"index": 222, "points": 5}, {"index": 223, "points": 5}, {"index": 232, "points": 1}, {"index": 311, "points": 5}, {"index": 312, "points": 5}, {"index": 323, "points": 5}, {"index": 331, "points": 1}, {"index": 322, "points": 4}, {"index": 313, "points": 1}]
+
+## equipment
+  resolved at 0x091A3408b6b07b503B18d942aA0e73DE2F1D66d6 — try enumerating
+  equipment entities = []
