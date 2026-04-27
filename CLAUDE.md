@@ -79,6 +79,22 @@ Canonical definitions live in `schema/schema.sql`. Summary:
   via `getKami` + `world.components()` getters (slots / skills /
   equipment); refreshed daily on the same sweep, latest snapshot
   only. In-game equipment capacity is `1 + total_slots`.
+  Modifiers (Session 11) — 12 INTEGER columns, catalog-derived sum
+  over skills × equipment, percent values ×1000, refreshed alongside
+  build columns on the same `build_refreshed_ts`. SHS/SPS/SVS/SYS NOT
+  re-emitted (already in `total_*`).
+  - `strain_boost` — `SB`, ×1000 (negative = less strain)
+  - `harvest_fertility_boost` — `HFB`, ×1000
+  - `harvest_intensity_boost` — `HIB`, Musu/hr (no ×1000)
+  - `harvest_bounty_boost` — `HBB`, ×1000
+  - `rest_recovery_boost` — `RMB`, ×1000
+  - `cooldown_shift` — `CS`, signed seconds (no ×1000)
+  - `attack_threshold_shift` — `ATS`, ×1000
+  - `attack_threshold_ratio` — `ATR`, ×1000
+  - `attack_spoils_ratio` — `ASR`, ×1000
+  - `defense_threshold_shift` — `DTS`, ×1000
+  - `defense_threshold_ratio` — `DTR`, ×1000
+  - `defense_salvage_ratio` — `DSR`, ×1000
 - **`ingest_cursor`**: ops state. Last committed block, vendor
   version, schema version.
 

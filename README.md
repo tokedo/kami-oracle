@@ -92,6 +92,38 @@ on the daily `kami_static` sweep, not event-triggered. See
 on-chain sources, the bpeon fixture cross-check, and resolved
 component addresses.
 
+## Skill-effect modifiers in `kami_static` (Session 11)
+
+On top of the four `total_*` stats, every `kami_static` row also
+carries the 12 non-stat skill-effect modifiers from the upstream
+`kamigotchi-context/systems/leveling.md` "Skill Effects" table —
+the values that make sustain-vs-combat-vs-yield builds visible.
+New columns: `strain_boost` (`SB`), `harvest_fertility_boost` (`HFB`),
+`harvest_intensity_boost` (`HIB`), `harvest_bounty_boost` (`HBB`),
+`rest_recovery_boost` (`RMB`), `cooldown_shift` (`CS`),
+`attack_threshold_shift` (`ATS`), `attack_threshold_ratio` (`ATR`),
+`attack_spoils_ratio` (`ASR`), `defense_threshold_shift` (`DTS`),
+`defense_threshold_ratio` (`DTR`), `defense_salvage_ratio` (`DSR`).
+
+All 12 are summed across a kami's owned skills (per-point catalog
+value × points spent) plus equipped items (catalog value × 1) using
+the upstream `skills.csv` + `items.csv` catalogs. The catalog → chain
+pipeline is faithful — round-tripped on bpeon's Zephyr (kami #43)
+where catalog SHS sums (50+50+40 = 140) and SYS sums (5+3 = 8) match
+chain `health.shift` and `harmony.shift` exactly. So the catalog walk
+produces the resolved totals the game itself uses.
+
+Stored at the same precision as on chain: percent values are ×1000
+(e.g. `strain_boost = -200` means -20%), `cooldown_shift` is signed
+seconds, `harvest_intensity_boost` is Musu/hr. Refreshed on the same
+daily sweep as the Session 10 build columns; same `build_refreshed_ts`
+marks both. The four stat-shift effects (`SHS`/`SPS`/`SVS`/`SYS`) are
+NOT new columns — they're already folded into `total_health` /
+`total_power` / `total_violence` / `total_harmony` via
+`getKami(id).stats`. See `memory/decoder-notes.md` "Session 11 —
+skill-effect modifiers on chain" for the catalog walk derivation,
+storage convention, and Zephyr round-trip.
+
 ## MUSU semantics (read once)
 
 `kami_action.amount` is **gross MUSU pre-tax** — the integer

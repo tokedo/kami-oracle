@@ -1,68 +1,67 @@
 # Next Steps
 
-## Session 11 — exploration-driven (founder picks lead)
+## Session 12 — exploration-driven (founder picks lead)
 
-Session 10 closed the build-snapshot ergonomics gap: every
-`kami_static` row now carries the kami's current effective stats
-(`level`, `xp`, `total_health`, `total_power`, `total_violence`,
-`total_harmony`, `total_slots`), upgraded skills (`skills_json`),
-and equipped items (`equipment_json`), with `build_refreshed_ts`
-ticking on the daily sweep. The numbers come from the canonical
-game formula `floor((1000 + boost) * (base + shift) / 1000)`
-applied to the chain's `(base, shift, boost, sync)` Stat tuple — no
-local recomputation. Schema version is now 4. Bpeon's Zephyr (kami
-#43) round-trip cleanly: level=37, total_health=230, total_power=16,
-total_harmony=19, total_violence=17, total_slots=0, 10 skills
-(sum points = 37, matches level), 0 equipment.
+Session 11 closed the modifier-visibility gap: every `kami_static`
+row now carries the 12 non-stat skill-effect modifiers
+(`strain_boost`, `harvest_*_boost`, `rest_recovery_boost`,
+`cooldown_shift`, `attack_*`, `defense_*`) on top of the Session 10
+build columns. Sums are catalog-derived from `skills_json` ×
+`equipment_json` × the upstream skill+item catalogs — zero new chain
+calls; ~68 s for the 7,021-row backfill. Catalog → chain pipeline
+validated on bpeon's Zephyr (catalog SHS sums = 140 = chain
+`health.shift` exactly; catalog SYS sums = 8 = chain
+`harmony.shift` exactly). Schema version is now 5. Sustain meta is
+visible: 1,683 of 7,021 kamis carry `strain_boost < 0`, max sustain
+build is `strain_boost = -325` (`0xRobster`'s top kamis).
 
-Session 10 verification report: `memory/session-10-verification.md`.
+Session 11 verification report: `memory/session-11-verification.md`.
 
-### What Session 11 is for
+### What Session 12 is for
 
 **Stage 1 stays observe-the-chain.** Daily rollups, net-of-tax
 views, and historical build journals remain deferred until a
-consumer asks. Session 11's lead item should come from continued
+consumer asks. Session 12's lead item should come from continued
 Colab exploration and the founder's meta-clustering work — let the
 founder pick based on what surfaces.
 
-### Likely Session 11 candidates (founder picks priority)
+### Likely Session 12 candidates (founder picks priority)
 
 These are *candidate* leads; do not pre-pick. Wait for the founder
 to choose based on Colab usage + any new ergonomics gaps that
 surface.
 
-1. **Event-triggered build refresh** — refresh a kami's build
-   columns on `skill_upgrade` / `skill_respec` / `equip` /
-   `unequip` / `lvlup` rather than only on the daily sweep. Only
-   worth doing if Session 10's daily sweep proves too coarse —
-   meta and builds change much more slowly than the 28-day window,
-   so daily is probably fine. Per-event refresh adds complexity and
-   poller load; gate on actual staleness complaints.
-2. **`kami_snapshot` (historical build journal)** — graduate from
-   latest-snapshot to point-in-time. Only if a consumer asks for
-   "what was kami X's build when it earned that MUSU on day Y".
-   The latest-snapshot `kami_static` is sufficient for current-meta
-   clustering; historical drift is a separable concern.
-3. **Daily rollups** — still only after Colab usage identifies a
-   recurring query whose latency at full-scan is genuinely
-   intolerable. Don't materialize speculatively. Most build × perf
-   queries currently land in <500 ms on the public endpoint, well
-   under the threshold.
-4. **`kami-zero` wire-in (observation only)** — happens on the
-   `kami-agent` VM, not here. The human sequences it through
-   `blocklife-ai`. Lead query: top-20 MUSU leaderboard (7d) joined
-   to build columns, logged to kami-zero's perception loop with no
-   effect on strategy.
-5. **Tier-B `quest.accept` overlay batch** — selector `0x09c90324`
+1. **Per-tree skill-point counters** — derive `harvester_points`,
+   `predator_points`, `guardian_points`, `enlightened_points` from
+   `skills_json` × `kami_context/catalogs/skills.csv` (Tree column).
+   Pure aggregation, no new chain reads, no new chain math — just
+   a second catalog field exposed as four columns or a SQL view.
+   Founder picks columns vs view based on whether the
+   `kami_context/` catalog reload cycle should reflow into stored
+   data. (Same shape as Session 11 modifiers — extends the existing
+   `compute_modifiers` path naturally.)
+2. **Event-triggered build/modifier refresh** — refresh on
+   `skill_upgrade` / `skill_respec` / `equip` / `unequip` / `lvlup`
+   rather than only on the daily sweep. Worth doing only if the
+   daily sweep cost (Session 10 ~117 min for build extras +
+   Session 11 ~1 min for modifiers) becomes contention. Modifier
+   add-on is essentially free, so the call is purely on Session 10
+   build extras — gate on actual staleness complaints.
+3. **Tier-B `quest.accept` overlay batch** — selector `0x09c90324`
    against `system.quest.accept`. Sample list in
-   `memory/unknown-systems.md` is now well over a thousand tx;
-   useful for an upstream-PR-style reproduction once we have the
+   `memory/unknown-systems.md` is well over a thousand tx; useful
+   for an upstream-PR-style reproduction once we have the
    signature.
-6. **Net-of-tax MUSU view** — only when an operator-economics
+4. **Net-of-tax MUSU view** — only when an operator-economics
    consumer asks. The schema records gross by design (kami
    leaderboards must use gross because tax is a node-config
    artifact).
-7. **`kami_context` upstream PR — `getValue` typo.**
+5. **`kami-zero` wire-in (observation only)** — happens on the
+   `kami-agent` VM, not here. The human sequences it through
+   `blocklife-ai`. Lead query: top-20 MUSU leaderboard (7d) joined
+   to build columns + modifiers, logged to kami-zero's perception
+   loop with no effect on strategy.
+6. **`kami_context` upstream PR — `getValue` typo.**
    `system-ids.md` documents the ValueComponent read fn as
    `getValue(uint256)`; the actual ABI declares only `get(uint256)`
    and `safeGet(uint256)`. Reproduction recipe in
@@ -70,21 +69,34 @@ surface.
    cross-check". Same flavour: `integration/ids/components.json`
    omits `component.id.equipment.owns` (Session 10 found it on
    chain via `world.components()` — the cheat sheet is incomplete).
-8. **Skill-name resolution in `kami_static`** — currently
-   `skills_json` stores raw skill indices. The catalog
-   (`kamigotchi-context/catalogs/skills.csv`) maps index → named
-   skill. Bundle into `kami_static` as a flat denormalised
-   `skills_named_json` column if the founder finds Colab `index=212`
-   readouts ergonomically painful.
-9. **Equipment slot-name resolution** — Session 10 stores
-   `equipment_json` as a flat list of item indices; slot-name
-   resolution (`component.for.string`) does not resolve in the
-   current registry. If a future re-vendor or registry update
-   surfaces the component, switch `equipment_json` to a
-   `{slot: item_index}` map.
-10. **Other ergonomics gaps** the founder surfaces during continued
+   Add Session 11's finding too: the per-modifier components
+   (`component.boost.harvest.fertility`, `component.shift.attack.threshold`,
+   etc.) do NOT exist in the deployed components registry — every
+   kami's modifier values are catalog-resolved by the LibBonus
+   loop at action time, not stored as scalars. Worth flagging
+   upstream so the docs match reality.
+7. **Skill-name resolution in `kami_static`** — `skills_json`
+   stores raw skill indices. The catalog (`skills.csv`) maps
+   index → named skill; modifier columns already join through
+   the catalog under the hood, so projecting names alongside is
+   trivial.
+8. **Equipment slot-name resolution** — `equipment_json` is a
+   flat list of item indices. Slot-name resolution
+   (`component.for.string`) does not resolve in the current
+   registry. If a future re-vendor or registry update surfaces
+   the component, switch `equipment_json` to a `{slot: item_index}`
+   map.
+9. **`kami_snapshot` (historical build journal)** — graduate from
+   latest-snapshot to point-in-time. Only if a consumer asks for
+   "what was kami X's build when it earned that MUSU on day Y".
+10. **Daily rollups** — still only after Colab usage identifies a
+    recurring query whose latency at full-scan is genuinely
+    intolerable. Don't materialize speculatively. Most build × perf
+    queries currently land in <500 ms on the public endpoint, well
+    under the threshold.
+11. **Other ergonomics gaps** the founder surfaces during continued
     Colab exploration — easy to bundle into a small polish session
-    like Session 9 / 10.
+    like Session 9 / 10 / 11.
 
 ### Deferred-until-asked
 
@@ -119,29 +131,85 @@ not "ship every plausible aggregation."
 
 ### Hand-off to human (blocklife-ai)
 
-The `blocklife-ai` repo's
-`context/kami-oracle-bootstrap/colab-setup.md` should grow new
-example queries that lean on the Session 10 build columns. The
-oracle VM cannot write to `blocklife-ai`, so the human applies this
-diff separately.
+Two diffs that the oracle VM cannot apply because they target other
+repos. The human applies both.
 
-**Diff to apply to
-`blocklife-ai/context/kami-oracle-bootstrap/colab-setup.md`:**
+#### Diff A — `kami-agent/integration/oracle.md` schema cheat sheet
 
-#### 1. Schema cheat-sheet update — `kami_static` row
+The kami-agent repo's `integration/oracle.md` already documents the
+Session 10 build columns; add a `kami_static` modifier-columns block
+mirroring the entries below. One-line each, same shape as the
+Session 10 columns:
 
-Add the build columns to the `kami_static` row in the schema cheat
-sheet, with a one-line note:
+> `kami_static.{strain_boost, harvest_fertility_boost,
+> harvest_intensity_boost, harvest_bounty_boost,
+> rest_recovery_boost, cooldown_shift,
+> attack_threshold_shift, attack_threshold_ratio,
+> attack_spoils_ratio, defense_threshold_shift,
+> defense_threshold_ratio, defense_salvage_ratio}` — 12 INTEGER
+> columns, sums of skill+equipment effects from
+> `kamigotchi-context/catalogs/{skills,items}.csv`. Percent values
+> stored ×1000 (`strain_boost = -200` means -20%); `cooldown_shift`
+> in signed seconds; `harvest_intensity_boost` in Musu/hr. Refreshed
+> on the same `build_refreshed_ts` sweep as Session 10 build columns.
+> SHS/SPS/SVS/SYS NOT new columns — already in `total_*`. See
+> `memory/decoder-notes.md` "Session 11 — skill-effect modifiers on
+> chain" for the catalog walk derivation and Zephyr round-trip.
 
-> `kami_static.{level, xp, total_health, total_power, total_violence,
-> total_harmony, total_slots, skills_json, equipment_json,
-> build_refreshed_ts}` — build snapshot, refreshed daily,
-> chain-read effective totals via the canonical formula
-> `floor((1000+boost)*(base+shift)/1000)`. In-game equipment
-> capacity is `1 + total_slots`. `skills_json` stores
-> `[{index, points}, ...]`; `equipment_json` stores
-> `[item_index, ...]`. See `memory/decoder-notes.md` "Session 10 —
-> build fields on chain" for sources.
+#### Diff B — `blocklife-ai/context/kami-oracle-bootstrap/colab-setup.md`
+
+The `colab-setup.md` should grow modifier-aware example queries on
+top of the Session 10 build queries already there.
+
+**1. Schema cheat-sheet update — `kami_static` row**
+
+Add the modifier columns to the `kami_static` row in the schema
+cheat sheet, with a one-line note:
+
+> `kami_static.{strain_boost, harvest_fertility_boost,
+> harvest_intensity_boost, harvest_bounty_boost,
+> rest_recovery_boost, cooldown_shift,
+> attack_threshold_shift, attack_threshold_ratio,
+> attack_spoils_ratio, defense_threshold_shift,
+> defense_threshold_ratio, defense_salvage_ratio}` — Session 11
+> skill-effect modifier sums, INTEGER, percent values stored ×1000,
+> `cooldown_shift` in signed seconds, `harvest_intensity_boost` in
+> Musu/hr. Refreshed alongside Session 10 build columns.
+
+**2. New example query — gas-efficient sustain harvesters**
+
+The strain-reduction meta the founder surfaced — top-20 sustain
+harvesters by absolute strain reduction with their 7d earnings:
+
+```sql
+-- Top-20 sustain-meta harvesters: most-negative strain_boost,
+-- joined to gross MUSU/7d. -325 means -32.5% strain (longer harvests,
+-- fewer feeds, lower gas).
+SELECT s.kami_index, s.name, s.account_name AS operator,
+       s.level, s.total_harmony, s.strain_boost,
+       s.harvest_intensity_boost, s.harvest_bounty_boost,
+       p.musu_gross_7d, p.payouts
+FROM kami_static s
+LEFT JOIN (
+  SELECT kami_id,
+         SUM(CAST(amount AS HUGEINT)) AS musu_gross_7d,
+         COUNT(*) AS payouts
+  FROM kami_action
+  WHERE amount IS NOT NULL
+    AND action_type IN ('harvest_collect','harvest_stop')
+    AND block_timestamp > now() - INTERVAL 7 DAY
+  GROUP BY 1
+) p USING (kami_id)
+WHERE s.strain_boost IS NOT NULL
+ORDER BY s.strain_boost ASC
+LIMIT 20;
+```
+
+Workflow note: pull the result into pandas, group `strain_boost` into
+buckets (`(-400, -200]`, `(-200, -100]`, `(-100, 0)`, `[0]`), and
+plot `musu_gross_7d / payouts` per bucket. A clean monotone shows
+the meta-cluster narrative; flat means strain reduction isn't pulling
+its weight in the current node mix.
 
 #### 2. New example query — top earners × build (the founder's flagship)
 
@@ -274,7 +342,9 @@ which operators.)
   `logs/backfill-musu.log`, `logs/backfill-liquidate-harvest-id.log`,
   `logs/backfill-account-names.log` (Session 9 backfill output
   preserved), `logs/backfill-kami-build.log` (Session 10),
-  `/var/log/caddy/kami-oracle.log`.
+  `/var/log/caddy/kami-oracle.log`. Session 11 backfill
+  (`scripts/backfill_kami_modifiers.py`) ran inline — output captured
+  in `memory/session-11-verification.md` rather than a long-tail log.
 - **Backups**: `gs://kami-oracle-backups/` (cron `15 4 * * *` UTC,
   14-day retention).
 - **Token rotation**: regenerate via `python3 -c "import secrets;
@@ -283,8 +353,8 @@ which operators.)
 - **DB file**: `db/kami-oracle.duckdb`. Held under exclusive lock
   by the serve process. Stop the unit before opening a DuckDB shell
   on the file directly.
-- **Schema version**: 4 (Session 10 added 10 build columns to
-  `kami_static` via migration 004). Storage.bootstrap auto-applies
+- **Schema version**: 5 (Session 11 added 12 modifier columns to
+  `kami_static` via migration 005). Storage.bootstrap auto-applies
   pending migrations on every start; bump `SCHEMA_VERSION` in
   `ingester/storage.py` and add a numbered file under `migrations/`
   for the next change.
@@ -311,3 +381,9 @@ which operators.)
   `getEntitiesWithValue(uint256)` ABI, different registry contract.
   Resolved addresses listed in `memory/decoder-notes.md`
   "Session 10 — build fields on chain".
+- **Skill / equipment catalog (Session 11)**:
+  `kami_context/catalogs/{skills.csv,items.csv}` are vendored from
+  upstream Kamigotchi via `scripts/vendor-context.sh`. Re-vendor
+  any time upstream ships new skills or equipment items. The
+  modifier populator caches both at startup; any subsequent
+  populator pass picks up catalog changes on next service restart.
