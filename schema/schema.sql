@@ -107,6 +107,46 @@ CREATE TABLE IF NOT EXISTS kami_static (
     base_power        INTEGER,
     base_harmony      INTEGER,
     base_violence     INTEGER,
+    -- Build snapshot fields (Session 10): the kami's current effective
+    -- stats, level, skills, and equipment. Read directly from chain
+    -- getters/components — the resolved totals come from the canonical
+    -- game formula `floor((1000 + boost) * (base + shift) / 1000)`
+    -- applied to the (base, shift, boost, sync) Stat tuple returned by
+    -- GetterSystem.getKami / SlotsComponent.safeGet. Not a local
+    -- recomputation from first principles — the formula is the one
+    -- documented in kamigotchi-context (state-reading.md, health.md)
+    -- and used by every other Kamigotchi client. Refreshed by the
+    -- kami_static populator on a daily sweep; build_refreshed_ts is
+    -- the per-kami refresh timestamp (distinct from last_refreshed_ts,
+    -- which covers traits + account fields). NULL during initial
+    -- backfill, populated for >=95% of active kamis post-Session 10.
+    -- See memory/decoder-notes.md "Session 10 — build fields on chain"
+    -- for per-field on-chain source, the bpeon fixture cross-check,
+    -- and resolved component addresses.
+    --
+    -- total_slots stores the slots-stat resolved scalar; the in-game
+    -- equipment capacity is `1 + total_slots` (per equipment.md, base
+    -- capacity is implicit 1). Stored without the +1 to keep the
+    -- column shape identical to total_health/total_power/etc.
+    --
+    -- skills_json: JSON array `[{"index": int, "points": int}, ...]`.
+    -- Skill catalog (which index = which named skill) lives in
+    -- kamigotchi-context/catalogs/skills.csv.
+    --
+    -- equipment_json: JSON array `[item_index, ...]`. Slot-name
+    -- resolution deferred — component.for.string does not resolve in
+    -- the current registry snapshot; capacity is 1 today so the loss
+    -- is small.
+    level             INTEGER,
+    xp                BIGINT,
+    total_health      INTEGER,
+    total_power       INTEGER,
+    total_violence    INTEGER,
+    total_harmony     INTEGER,
+    total_slots       INTEGER,
+    skills_json       VARCHAR,                  -- JSON array of {index, points}
+    equipment_json    VARCHAR,                  -- JSON array of item_index
+    build_refreshed_ts TIMESTAMP,
     first_seen_ts     TIMESTAMP    NOT NULL,
     last_refreshed_ts TIMESTAMP    NOT NULL
 );
