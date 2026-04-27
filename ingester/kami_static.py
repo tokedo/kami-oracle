@@ -83,6 +83,13 @@ class KamiStatic:
     base_power: int | None
     base_harmony: int | None
     base_violence: int | None
+    # Session 12 affinity scalars. Extracted from `affinities` (chain
+    # returns string[2] = [body_affinity, hand_affinity]) for query
+    # ergonomics — denormalized so kami-agent can JOIN/GROUP BY without
+    # parsing JSON inline. NULL when affinities array shape is unexpected
+    # (length != 2); see _kami_shape_to_static defensive path.
+    body_affinity: str | None = None
+    hand_affinity: str | None = None
     # Session 10 build snapshot fields. All optional — populator writes
     # them on success, leaves NULL + sets build_refreshed_ts on per-kami
     # build-fetch failure so the row isn't infinite-retried.
@@ -166,6 +173,25 @@ def _kami_shape_to_static(kami_id: str, shape: tuple) -> KamiStatic:
     account_int = int(account)
     owner = _account_id_to_address(account_int) if account_int != 0 else None
 
+    # Affinity scalars (Session 12). Chain contract guarantees a 2-string
+    # array [body_affinity, hand_affinity] per kamigotchi-context
+    # state-reading.md:101 — but defensively NULL+log if a particular
+    # kami returns something else, matching the build-extras failure
+    # posture (one bad kami doesn't break the sweep).
+    affinities_list = [str(a) for a in affinities]
+    body_aff: str | None
+    hand_aff: str | None
+    if len(affinities_list) == 2:
+        body_aff = affinities_list[0]
+        hand_aff = affinities_list[1]
+    else:
+        log.warning(
+            "kami_static: kami_id=%s affinities length=%d (expected 2): %r — body_affinity / hand_affinity NULL",
+            kami_id, len(affinities_list), affinities_list,
+        )
+        body_aff = None
+        hand_aff = None
+
     return KamiStatic(
         kami_id=str(kami_id),
         kami_index=int(kami_index),
@@ -179,11 +205,13 @@ def _kami_shape_to_static(kami_id: str, shape: tuple) -> KamiStatic:
         face=int(face),
         background=int(background),
         color=int(color),
-        affinities=[str(a) for a in affinities],
+        affinities=affinities_list,
         base_health=int(health[0]),
         base_power=int(power[0]),
         base_harmony=int(harmony[0]),
         base_violence=int(violence[0]),
+        body_affinity=body_aff,
+        hand_affinity=hand_aff,
         level=int(level),
         xp=int(xp),
         total_health=_stat_total(int(health[0]), int(health[1]), int(health[2])),
@@ -473,6 +501,7 @@ def upsert_kami_static(storage: Storage, rows: Iterable[KamiStatic]) -> int:
             r.harvest_bounty_boost, r.rest_recovery_boost, r.cooldown_shift,
             r.attack_threshold_shift, r.attack_threshold_ratio, r.attack_spoils_ratio,
             r.defense_threshold_shift, r.defense_threshold_ratio, r.defense_salvage_ratio,
+            r.body_affinity, r.hand_affinity,
             now, now,
         )
         for r in rows
@@ -493,10 +522,12 @@ def upsert_kami_static(storage: Storage, rows: Iterable[KamiStatic]) -> int:
                  harvest_bounty_boost, rest_recovery_boost, cooldown_shift,
                  attack_threshold_shift, attack_threshold_ratio, attack_spoils_ratio,
                  defense_threshold_shift, defense_threshold_ratio, defense_salvage_ratio,
+                 body_affinity, hand_affinity,
                  first_seen_ts, last_refreshed_ts)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?,
                     ?, ?)
             ON CONFLICT (kami_id) DO UPDATE SET
                 kami_index = excluded.kami_index,
@@ -537,6 +568,8 @@ def upsert_kami_static(storage: Storage, rows: Iterable[KamiStatic]) -> int:
                 defense_threshold_shift = excluded.defense_threshold_shift,
                 defense_threshold_ratio = excluded.defense_threshold_ratio,
                 defense_salvage_ratio = excluded.defense_salvage_ratio,
+                body_affinity = excluded.body_affinity,
+                hand_affinity = excluded.hand_affinity,
                 last_refreshed_ts = excluded.last_refreshed_ts
             """,
             payload,

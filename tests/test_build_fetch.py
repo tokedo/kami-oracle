@@ -84,6 +84,11 @@ def test_kami_shape_round_trip_zephyr_fixture():
     assert row.name == "Zephyr"
     assert row.account_id == str(zephyr_account_int)
     assert row.affinities == ["NORMAL", "EERIE"]
+    # Session 12: scalar affinity columns extracted from affinities[0]/[1].
+    # Zephyr's chain dump (memory/session-12-discovery.txt, block 28147942)
+    # = ['NORMAL', 'EERIE'] -> body=NORMAL, hand=EERIE. Stored verbatim.
+    assert row.body_affinity == "NORMAL"
+    assert row.hand_affinity == "EERIE"
     assert row.level == 37
     assert row.xp == 136367
     assert row.base_health == 90
@@ -97,6 +102,39 @@ def test_kami_shape_round_trip_zephyr_fixture():
     # total_health > base_health because skill shift = 140 — sanity that we're
     # reading the effective total, not just the base.
     assert row.total_health > row.base_health
+
+
+def test_kami_shape_affinity_defensive_on_unexpected_length(caplog):
+    """If chain returns affinities with length != 2, both scalar columns
+    must be NULL and the kami_id must be logged. Matches Session 10 /
+    Session 11 failure posture: one bad kami should not break the sweep.
+    """
+    import logging as _logging
+
+    bogus_id = "999999999999999999999999999999999999999999999999999999999999999999"
+    shape = (
+        int(bogus_id),
+        9999,
+        "Bogus",
+        "ipfs://...",
+        ((10, 0, 0, 0), (10, 0, 0, 0), (10, 0, 0, 0), (10, 0, 0, 0)),
+        (1, 2, 3, 4, 5),
+        ["INSECT"],  # length-1 array — chain quirk simulation
+        0,
+        1,
+        0,
+        0,
+        "RESTING",
+    )
+    with caplog.at_level(_logging.WARNING, logger="ingester.kami_static"):
+        row = _kami_shape_to_static(bogus_id, shape)
+
+    assert row.affinities == ["INSECT"]
+    assert row.body_affinity is None
+    assert row.hand_affinity is None
+    assert any(bogus_id in rec.getMessage() for rec in caplog.records), (
+        "expected the kami_id to appear in the warning message"
+    )
 
 
 # ---------------------------------------------------------------------------
