@@ -66,9 +66,19 @@ Canonical definitions live in `schema/schema.sql`. Summary:
   `skill_respec`, `equip`, `unequip`, `revive`, `die`, `quest_accept`,
   `quest_complete`, `quest_drop`, `trade_create`, `trade_execute`,
   `trade_complete`, `trade_cancel`, `item_use`, `item_craft`.
-- **`kami_static`**: per-kami traits. `kami_id` (PK), `owner_address`,
-  `body`, `hand`, `face`, `background`, base stats, `first_seen_ts`,
-  `last_refreshed_ts`.
+- **`kami_static`**: per-kami traits + operator + build snapshot.
+  `kami_id` (PK), `owner_address`, `account_index`, `account_name`
+  (in-game operator label, Session 9), `body`, `hand`, `face`,
+  `background`, `color`, `affinities`, `base_*` stats,
+  `first_seen_ts`, `last_refreshed_ts`. Session 10 build columns:
+  `level`, `xp`, `total_health`, `total_power`, `total_violence`,
+  `total_harmony`, `total_slots` (effective scalars resolved via the
+  canonical game formula `floor((1000+boost)*(base+shift)/1000)`),
+  `skills_json` (`[{index, points}, ...]`), `equipment_json`
+  (`[item_index, ...]`), `build_refreshed_ts`. Build fields read
+  via `getKami` + `world.components()` getters (slots / skills /
+  equipment); refreshed daily on the same sweep, latest snapshot
+  only. In-game equipment capacity is `1 + total_slots`.
 - **`ingest_cursor`**: ops state. Last committed block, vendor
   version, schema version.
 

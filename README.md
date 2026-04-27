@@ -68,6 +68,30 @@ still the canonical EOA wallet; `kami_action.from_addr` is the
 *signer* (often a kamibots automation key, which can differ from
 the owning account under automation).
 
+## Build snapshot in `kami_static` (Session 10)
+
+Every `kami_static` row now carries the kami's current **build** —
+its effective stats, level, skills, and equipment — alongside the
+trait + operator fields. New columns: `level`, `xp`, `total_health`,
+`total_power`, `total_violence`, `total_harmony`, `total_slots`,
+`skills_json`, `equipment_json`, `build_refreshed_ts`.
+
+The four `total_*` stats are read directly from the chain via
+`GetterSystem.getKami(...)` and resolved through the canonical game
+formula `floor((1000 + boost) * (base + shift) / 1000)` documented
+in `kamigotchi-context/systems/state-reading.md`. They are the same
+effective scalars the in-game UI shows — not local recomputations
+from base + first-principles. `total_slots` comes from
+`SlotsComponent.safeGet(kamiId)` via the same formula; the in-game
+equipment capacity is `1 + total_slots`. `skills_json` is a JSON
+array of `{index, points}` per upgraded skill; `equipment_json` is a
+JSON array of equipped item indices. Latest snapshot only — refreshed
+on the daily `kami_static` sweep, not event-triggered. See
+`schema/schema.sql` for the full per-column comment block and
+`memory/decoder-notes.md` "Session 10 — build fields on chain" for
+on-chain sources, the bpeon fixture cross-check, and resolved
+component addresses.
+
 ## MUSU semantics (read once)
 
 `kami_action.amount` is **gross MUSU pre-tax** — the integer
