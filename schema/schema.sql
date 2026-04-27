@@ -171,6 +171,15 @@ CREATE TABLE IF NOT EXISTS kami_static (
     defense_threshold_shift   INTEGER,         -- DTS, ×1000
     defense_threshold_ratio   INTEGER,         -- DTR, ×1000
     defense_salvage_ratio     INTEGER,         -- DSR, ×1000
+    -- Affinity (Session 12): each kami has a body affinity and a hand
+    -- affinity drawn from {EERIE, NORMAL, SCRAP, INSECT}. Read from
+    -- getKami(kamiId).affinities (string[2]) — already fetched by the
+    -- Session 10 build populator, so this is a free extraction. The
+    -- existing integer body/hand columns are the trait indices; the new
+    -- affinity columns are the on-chain affinity strings, stored in
+    -- whatever case the chain returns (do not normalize).
+    body_affinity     VARCHAR,
+    hand_affinity     VARCHAR,
     first_seen_ts     TIMESTAMP    NOT NULL,
     last_refreshed_ts TIMESTAMP    NOT NULL
 );

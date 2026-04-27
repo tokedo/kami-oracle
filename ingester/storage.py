@@ -19,7 +19,7 @@ from .decoder import DecodedAction
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 @dataclass
@@ -97,6 +97,7 @@ class Storage:
         m003 = _load("migrations/003_add_account_name_columns.py", "migration_003")
         m004 = _load("migrations/004_add_build_columns.py", "migration_004")
         m005 = _load("migrations/005_add_modifier_columns.py", "migration_005")
+        m006 = _load("migrations/006_add_affinity_columns.py", "migration_006")
 
         # Each migration is idempotent — safe to run on a fresh install where
         # the columns may already exist via schema.sql.
@@ -119,6 +120,11 @@ class Storage:
             log.info("storage: applying migration 005 (add modifier columns)")
             stats = m005.run(self.conn)
             log.info("storage: migration 005 complete: %s", stats)
+
+        if version < m006.TARGET_SCHEMA_VERSION:
+            log.info("storage: applying migration 006 (add affinity columns)")
+            stats = m006.run(self.conn)
+            log.info("storage: migration 006 complete: %s", stats)
 
     # ------------------------------------------------------------------
     # Cursor.
