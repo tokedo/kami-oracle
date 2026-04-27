@@ -235,3 +235,119 @@ def test_fetch_build_extras_tolerates_per_component_failure():
     assert extras["total_slots"] == 0
     assert "skills_json" not in extras  # absent on per-component failure
     assert json.loads(extras["equipment_json"]) == [1234]
+
+
+# ---------------------------------------------------------------------------
+# Session 11 — modifier catalog walk on Zephyr.
+# ---------------------------------------------------------------------------
+
+
+def _load_real_catalog():
+    from pathlib import Path
+
+    from ingester.skill_catalog import load_skill_catalog
+
+    return load_skill_catalog(Path(__file__).resolve().parent.parent / "kami_context" / "catalogs")
+
+
+def test_modifiers_zephyr_catalog_walk():
+    """Bpeon Zephyr (kami #43) round-trip via the catalog.
+
+    Skills + equipment from Session 10 / 11 discovery dump:
+    skills [{212,5},{222,5},{223,5},{232,1},{311,5},{312,5},{323,5},
+            {331,1},{322,4},{313,1}], equipment []. Expected modifier
+    columns recorded in memory/session-11-discovery.txt — these come from
+    walking the upstream catalog and must round-trip exactly to the
+    populator's stored values.
+    """
+    cat = _load_real_catalog()
+    skills_json = json.dumps([
+        {"index": 212, "points": 5},
+        {"index": 222, "points": 5},
+        {"index": 223, "points": 5},
+        {"index": 232, "points": 1},
+        {"index": 311, "points": 5},
+        {"index": 312, "points": 5},
+        {"index": 323, "points": 5},
+        {"index": 331, "points": 1},
+        {"index": 322, "points": 4},
+        {"index": 313, "points": 1},
+    ])
+    mods = cat.compute_modifiers(skills_json, "[]")
+    assert mods == {
+        "strain_boost": -125,             # 223 Concentration: -25 ×1000 × 5
+        "harvest_fertility_boost": 0,
+        "harvest_intensity_boost": 20,    # 232 Warmup ×1×15 + 313 Patience ×1×5
+        "harvest_bounty_boost": 0,
+        "rest_recovery_boost": 0,
+        "cooldown_shift": 0,
+        "attack_threshold_shift": 0,
+        "attack_threshold_ratio": 0,
+        "attack_spoils_ratio": 0,
+        "defense_threshold_shift": 200,   # 222 Meditative ×5×20 + 323 Armor ×5×20
+        "defense_threshold_ratio": 0,
+        "defense_salvage_ratio": 0,
+    }
+
+
+def test_modifiers_strain_boost_sign_handling():
+    """SB / CS / threshold-shift columns must round-trip negative values.
+
+    Catches the sign-handling bug class — if anyone introduces an ABS or
+    UINT cast in the catalog parser, this test breaks. SB on Zephyr is
+    -125; an enlightened-tree-heavy build would be more negative.
+    """
+    cat = _load_real_catalog()
+    # Hypothetical max-strain-reduction build: skill 263 Immortality
+    # (SB -0.125 ×1 max=1) + skill 223 Concentration (SB -0.025 ×5 max=5)
+    # + skill 243 Endurance (SB -0.025 ×5 max=5) → -125 + -125 + -125 = -375
+    skills_json = json.dumps([
+        {"index": 263, "points": 1},
+        {"index": 223, "points": 5},
+        {"index": 243, "points": 5},
+    ])
+    mods = cat.compute_modifiers(skills_json, "[]")
+    assert mods["strain_boost"] < 0
+    assert mods["strain_boost"] == -375
+
+    # CS sign: skill 163 Assassin -50 sec ×1 — must store as int(-50).
+    cs_skills = json.dumps([{"index": 163, "points": 1}])
+    cs_mods = cat.compute_modifiers(cs_skills, "[]")
+    assert cs_mods["cooldown_shift"] == -50
+
+
+def test_modifiers_equipment_walk():
+    """An equipped item that grants a modifier must contribute its
+    catalog value. Item 30007 (Mask of Mischief, E_ASR+6%) → 60 ×1000."""
+    cat = _load_real_catalog()
+    # Empty skills, one equipped Mask of Mischief.
+    mods = cat.compute_modifiers("[]", json.dumps([30007]))
+    assert mods["attack_spoils_ratio"] == 60
+
+    # Equipment that grants a stat shift (E_HEALTH+30 → SHS) must NOT
+    # appear in the 12 modifier columns — those four are already in
+    # total_*. Only the 12 non-stat keys are surfaced here.
+    health_only = cat.compute_modifiers("[]", json.dumps([30016]))  # Old Critter, E_HEALTH+30
+    assert all(v == 0 for v in health_only.values())
+
+
+def test_modifiers_zero_floor_when_no_skills_or_equipment():
+    """A kami with no skills + no equipment must get all-zero modifiers,
+    not NULL — the populator distinguishes 0 (no investment) from NULL
+    (compute failed)."""
+    cat = _load_real_catalog()
+    mods = cat.compute_modifiers("[]", "[]")
+    assert mods == {
+        "strain_boost": 0,
+        "harvest_fertility_boost": 0,
+        "harvest_intensity_boost": 0,
+        "harvest_bounty_boost": 0,
+        "rest_recovery_boost": 0,
+        "cooldown_shift": 0,
+        "attack_threshold_shift": 0,
+        "attack_threshold_ratio": 0,
+        "attack_spoils_ratio": 0,
+        "defense_threshold_shift": 0,
+        "defense_threshold_ratio": 0,
+        "defense_salvage_ratio": 0,
+    }

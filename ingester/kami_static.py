@@ -28,12 +28,14 @@ import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Iterable
 
 from eth_utils import keccak
 from web3 import Web3
 
 from .chain_client import ChainClient
+from .skill_catalog import ALL_MODIFIER_COLUMNS, SkillCatalog, load_skill_catalog
 from .storage import Storage
 from .system_registry import REGISTRY_ABI, SystemRegistry, load_abi
 
@@ -94,6 +96,22 @@ class KamiStatic:
     skills_json: str | None = None
     equipment_json: str | None = None
     build_refreshed_ts: dt.datetime | None = None
+    # Session 11 modifier columns. Default 0 (a kami with no skill /
+    # equipment investment in a given effect contributes 0). NULL is
+    # reserved for "modifier compute failed" — populator sets the dict
+    # to None in that path so the column stays NULL on UPSERT.
+    strain_boost: int | None = 0
+    harvest_fertility_boost: int | None = 0
+    harvest_intensity_boost: int | None = 0
+    harvest_bounty_boost: int | None = 0
+    rest_recovery_boost: int | None = 0
+    cooldown_shift: int | None = 0
+    attack_threshold_shift: int | None = 0
+    attack_threshold_ratio: int | None = 0
+    attack_spoils_ratio: int | None = 0
+    defense_threshold_shift: int | None = 0
+    defense_threshold_ratio: int | None = 0
+    defense_salvage_ratio: int | None = 0
 
 
 # GetterSystem.getAccount(uint256) is documented in
@@ -239,6 +257,13 @@ class KamiStaticReader:
         # web3 contract objects keyed by short name so _fetch_build_extras
         # can dispatch without re-resolving.
         self._build_components = self._resolve_build_components(client, registry, abi_dir)
+        # Skill+equipment catalog for the 12 Session 11 modifier columns.
+        # Loaded once at construction; immutable across the population pass.
+        # Same single-load shape as the per-pass account_id cache.
+        from .config import load_config  # noqa: PLC0415
+        cfg = load_config()
+        catalogs_dir = Path(cfg.abi_dir).parent / "catalogs"
+        self.skill_catalog: SkillCatalog = load_skill_catalog(catalogs_dir)
 
     def _resolve_build_components(
         self, client: ChainClient, registry: SystemRegistry, abi_dir,
@@ -318,6 +343,22 @@ class KamiStaticReader:
             row.equipment_json = extras.get("equipment_json")
         except Exception as e:  # noqa: BLE001
             log.warning("kami_static: build_extras(%s) failed: %s", kami_id, e)
+        # Session 11 modifier columns — pure aggregation over the
+        # already-fetched skills_json + equipment_json via the catalog
+        # cache. Zero new chain calls per kami. If catalog compute throws
+        # for any reason, NULL the 12 columns on this kami so the
+        # build_refreshed_ts still ticks forward (matching the build-extras
+        # failure posture).
+        try:
+            mods = self.skill_catalog.compute_modifiers(
+                row.skills_json, row.equipment_json,
+            )
+            for col, val in mods.items():
+                setattr(row, col, val)
+        except Exception as e:  # noqa: BLE001
+            log.warning("kami_static: modifier compute(%s) failed: %s", kami_id, e)
+            for col in ALL_MODIFIER_COLUMNS:
+                setattr(row, col, None)
         row.build_refreshed_ts = dt.datetime.now(tz=dt.timezone.utc)
         return row
 
@@ -428,6 +469,10 @@ def upsert_kami_static(storage: Storage, rows: Iterable[KamiStatic]) -> int:
             r.total_health, r.total_power, r.total_violence, r.total_harmony,
             r.total_slots, r.skills_json, r.equipment_json,
             r.build_refreshed_ts,
+            r.strain_boost, r.harvest_fertility_boost, r.harvest_intensity_boost,
+            r.harvest_bounty_boost, r.rest_recovery_boost, r.cooldown_shift,
+            r.attack_threshold_shift, r.attack_threshold_ratio, r.attack_spoils_ratio,
+            r.defense_threshold_shift, r.defense_threshold_ratio, r.defense_salvage_ratio,
             now, now,
         )
         for r in rows
@@ -444,9 +489,15 @@ def upsert_kami_static(storage: Storage, rows: Iterable[KamiStatic]) -> int:
                  total_health, total_power, total_violence, total_harmony,
                  total_slots, skills_json, equipment_json,
                  build_refreshed_ts,
+                 strain_boost, harvest_fertility_boost, harvest_intensity_boost,
+                 harvest_bounty_boost, rest_recovery_boost, cooldown_shift,
+                 attack_threshold_shift, attack_threshold_ratio, attack_spoils_ratio,
+                 defense_threshold_shift, defense_threshold_ratio, defense_salvage_ratio,
                  first_seen_ts, last_refreshed_ts)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?)
             ON CONFLICT (kami_id) DO UPDATE SET
                 kami_index = excluded.kami_index,
                 name = excluded.name,
@@ -474,6 +525,18 @@ def upsert_kami_static(storage: Storage, rows: Iterable[KamiStatic]) -> int:
                 skills_json = excluded.skills_json,
                 equipment_json = excluded.equipment_json,
                 build_refreshed_ts = excluded.build_refreshed_ts,
+                strain_boost = excluded.strain_boost,
+                harvest_fertility_boost = excluded.harvest_fertility_boost,
+                harvest_intensity_boost = excluded.harvest_intensity_boost,
+                harvest_bounty_boost = excluded.harvest_bounty_boost,
+                rest_recovery_boost = excluded.rest_recovery_boost,
+                cooldown_shift = excluded.cooldown_shift,
+                attack_threshold_shift = excluded.attack_threshold_shift,
+                attack_threshold_ratio = excluded.attack_threshold_ratio,
+                attack_spoils_ratio = excluded.attack_spoils_ratio,
+                defense_threshold_shift = excluded.defense_threshold_shift,
+                defense_threshold_ratio = excluded.defense_threshold_ratio,
+                defense_salvage_ratio = excluded.defense_salvage_ratio,
                 last_refreshed_ts = excluded.last_refreshed_ts
             """,
             payload,
