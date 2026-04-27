@@ -1284,3 +1284,123 @@ backfill. Daily refresh sweep is the same cost; that's the
 acceptable Stage-1 ceiling. **Event-triggered per-kami refresh on
 `skill_upgrade`/`equip` is deferred to Session 11+** if the daily
 sweep proves too coarse.
+
+## Session 11 — skill-effect modifiers on chain
+
+The 12 non-stat skill effects (`SB`, `HFB`, `HIB`, `HBB`, `RMB`, `CS`,
+`ATS`, `ATR`, `ASR`, `DTS`, `DTR`, `DSR` — full taxonomy in
+`kami_context/systems/leveling.md` "Skill Effects") are NOT exposed
+as pre-aggregated per-kami components on chain. Probing every
+plausible name (`component.boost.harvest.fertility`,
+`component.shift.attack.threshold`, etc. — 43 candidates in total)
+returned 0 hits in `world.components()` at block 28,145,273.
+
+Per-kami **bonus instances** do exist as separate entities, anchored to
+the skill or equipment instance via `component.id.anchor`
+(0xf04bd935E81445aF3BCd29Eb53Da7df0816A4CfE) and tagged with the
+holder via `component.id.holder`
+(0xD7388a0a79987CC85Ba3EF78a0Ac05Bc9Ade6ec0). Each bonus carries
+`component.level` (matches the SkillPointComponent on the anchor
+for skill bonuses; equals 1 for equipment) but NOT `component.type`
+or `component.value` — those live on the upstream skill/item
+**prototype** entity, which is unreachable via
+`IndexSkillComponent.getEntitiesWithValue` because that component is
+non-indexed (call reverts).
+
+### Source of truth: the upstream catalogs
+
+`kamigotchi-context/catalogs/skills.csv` and
+`kamigotchi-context/catalogs/items.csv` ARE the canonical source
+devs upload to chain at deploy. Round-trip evidence on Zephyr:
+
+  ```
+  health.shift on chain = 140
+  Σ catalog SHS contributions = 50 (212 Cardio ×5) + 50 (312 Toughness ×5) + 40 (322 Vigor ×4) = 140  ✓
+
+  harmony.shift on chain = 8
+  Σ catalog SYS contributions = 5 (311 Defensiveness ×5) + 3 (331 Anxiety ×1) = 8  ✓
+  ```
+
+This proves the catalog → chain pipeline is faithful. Stage 1 stores
+the catalog-walk sum as the resolved modifier, with `skills_json`
+and `equipment_json` as the per-kami inputs. Equivalent to "the
+game's own client-side aggregation," not "what the LibBonus solidity
+loop would return at the next block" — those should be identical
+for permanent bonuses (which is what these 12 modifiers are).
+
+### Storage convention
+
+Catalog units → stored integer:
+
+| Effect key | Catalog units | Stored as | Example |
+|---|---|---|---|
+| `SB`  | Percent (decimal) | int ×1000 (signed) | -0.025 → -25 per point |
+| `HFB` | Percent | int ×1000          | 0.06 → 60 per point |
+| `HIB` | Musu/hr (integer) | int (Musu/hr)      | 15 → 15 per point |
+| `HBB` | Percent | int ×1000          | 0.04 → 40 per point |
+| `RMB` | Percent | int ×1000          | 0.05 → 50 per point |
+| `CS`  | Seconds (integer, signed) | int (seconds, signed) | -10 → -10 per point |
+| `ATS` | Percent | int ×1000          | 0.02 → 20 per point |
+| `ATR` | Percent | int ×1000          | 0.05 → 50 per point |
+| `ASR` | Percent | int ×1000          | 0.02 → 20 per point |
+| `DTS` | Percent | int ×1000          | 0.02 → 20 per point |
+| `DTR` | Percent | int ×1000          | 0.05 → 50 per point |
+| `DSR` | Percent | int ×1000          | 0.02 → 20 per point |
+
+Per-kami modifier = Σ over owned skills (`points × per-point catalog
+value`) + Σ over equipped items (`equipment-row catalog value × 1`).
+
+### Skill key → kami_static column
+
+| Effect key | Column                   | Notes |
+|---|---|---|
+| `SB`  | `strain_boost`           | negative = less strain |
+| `HFB` | `harvest_fertility_boost`| % boost to base income rate |
+| `HIB` | `harvest_intensity_boost`| flat Musu/hr add |
+| `HBB` | `harvest_bounty_boost`   | % boost to total bounty |
+| `RMB` | `rest_recovery_boost`    | % heal-rate multiplier |
+| `CS`  | `cooldown_shift`         | collect cooldown delta in seconds (negative = shorter) |
+| `ATS` | `attack_threshold_shift` | additive shift to attack threshold |
+| `ATR` | `attack_threshold_ratio` | multiplicative ratio on attack threshold |
+| `ASR` | `attack_spoils_ratio`    | % of victim's bounty captured |
+| `DTS` | `defense_threshold_shift`| additive shift to defense threshold |
+| `DTR` | `defense_threshold_ratio`| multiplicative ratio on defense threshold |
+| `DSR` | `defense_salvage_ratio`  | % of own bounty saved on liquidation |
+
+The four stat-shift effects (`SHS`, `SPS`, `SVS`, `SYS`) are NOT
+new columns — they're already folded into Session 10's
+`total_health` / `total_power` / `total_violence` / `total_harmony`
+via `getKami(id).stats.*.shift` (the chain pre-aggregates them into
+the stat tuple).
+
+### Zephyr fixture cross-check
+
+Zephyr's expected modifier values from skills.csv × Session 10
+skills_json (kami #43, 0 equipment):
+
+```
+strain_boost              = -125     (= -12.5%, from skill 223 ×5)
+harvest_fertility_boost   = 0
+harvest_intensity_boost   = 20       (= 20 Musu/hr, from 232 ×1 + 313 ×1)
+harvest_bounty_boost      = 0
+rest_recovery_boost       = 0
+cooldown_shift            = 0
+attack_threshold_shift    = 0
+attack_threshold_ratio    = 0
+attack_spoils_ratio       = 0
+defense_threshold_shift   = 200      (= 20.0%, from 222 ×5 + 323 ×5)
+defense_threshold_ratio   = 0
+defense_salvage_ratio     = 0
+```
+
+These values must round-trip via the populator on the post-backfill
+`kami_static` row.
+
+### Cost / cadence
+
+Zero new chain calls per kami — modifier columns are derived purely
+from Session 10's already-fetched `skills_json` and
+`equipment_json` joined to an in-process catalog cache loaded once
+at populator startup. The "+30–60 min on the daily sweep"
+estimate in the Session 11 prompt was conservative — actual added
+cost is ~seconds (catalog load + per-kami arithmetic).

@@ -1,0 +1,156 @@
+# Session 11 — modifier-fields discovery dump
+
+## Decision summary
+
+The chain does NOT expose pre-aggregated per-modifier components for the 12
+non-stat skill effects (SB / HFB / HIB / HBB / RMB / CS / ATS / ATR / ASR /
+DTS / DTR / DSR). Probing 43 plausible component names — every variant of
+component.boost.X, component.shift.X, component.ratio.X, component.X for
+each modifier key — returns 0 hits in `world.components()`.
+
+Per-kami bonus *instances* DO exist on chain. Probing Zephyr's 10 owned
+skill instances via `IDAnchorComponent.getEntitiesWithValue(skill_instance_id)`
+returns 2 bonus entities per skill (1 active permanent + 1 cleanup
+hook, presumably). Each bonus entity carries:
+
+- `component.id.anchor` → the anchored skill / equipment instance entity
+- `component.level`     → the per-instance level multiplier (matches
+  SkillPointComponent on the skill anchor; equals 1 for equipment)
+
+But on those bonus entities:
+
+- `component.type.has(bonus_ent)` = False
+- `component.value.has(bonus_ent)` = False
+
+So the (effect_type, value_per_level) pair the LibBonus aggregator pulls
+from is NOT directly readable on the bonus entity. It lives on the skill /
+item PROTOTYPE entity. Resolving a prototype via
+`IndexSkillComponent.getEntitiesWithValue(<index_as_bytes>)` reverts —
+that component is non-indexed in the deployed registry. Walking
+all-entities to find the proto would require either:
+
+  a) `world.entities()` / `getNumEntities()` enumeration + per-entity
+     `IndexSkillComponent.has()` × ~tens-of-thousands round-trips, or
+  b) Indexing into upstream `LibSkill.create()` registry-init traces.
+
+Both are heavier than Stage 1 needs.
+
+## Catalog as canonical source
+
+The upstream catalogs `kamigotchi-context/catalogs/skills.csv` and
+`kamigotchi-context/catalogs/items.csv` ARE the canonical source devs
+upload to chain at deploy. The chain prototype's (Type, Value)
+components are initialized from these CSVs — no other source.
+
+Round-trip validation against Zephyr's stat tuple confirms it. Zephyr's
+on-chain `health.shift = 140` decomposes via the catalog:
+
+  | skill | name           | Effect | Value/pt | pts | contributes |
+  |-------|----------------|--------|----------|-----|-------------|
+  | 212   | Cardio         | SHS    | 10       | 5   | +50         |
+  | 312   | Toughness      | SHS    | 10       | 5   | +50         |
+  | 322   | Vigor          | SHS    | 10       | 4   | +40         |
+  |       |                |        |          |     | sum = 140   |
+
+Matches `health.shift = 140` on chain exactly. Same for `harmony.shift`:
+
+  | 311   | Defensiveness  | SYS    | 1        | 5   | +5          |
+  | 331   | Anxiety        | SYS    | 3        | 1   | +3          |
+  |       |                |        |          |     | sum = 8     |
+
+Matches `harmony.shift = 8` on chain exactly.
+
+This proves the catalog → chain pipeline is faithful and the catalog
+walk is sound.
+
+## Bpeon Zephyr expected modifier values
+
+Using `skills.csv` × Zephyr's `skills_json` (Session 10 dump) for the 12
+non-stat modifiers. Stat-shift effects (SHS/SPS/SVS/SYS) are excluded —
+those are already in Session 10's total_health/power/violence/harmony.
+
+Per-skill contributions to NEW columns:
+
+  | skill | name                  | Effect | Value      | pts | contribution to column      |
+  |-------|-----------------------|--------|------------|-----|-----------------------------|
+  | 222   | Meditative Breathing  | DTS    | 0.02 (%)   | 5   | defense_threshold_shift +100 (×1000) |
+  | 223   | Concentration         | SB     | -0.025 (%) | 5   | strain_boost            -125 (×1000) |
+  | 232   | Warmup Exercise       | HIB    | 15         | 1   | harvest_intensity_boost +15  (Musu/hr) |
+  | 313   | Patience              | HIB    | 5          | 1   | harvest_intensity_boost +5   (Musu/hr) |
+  | 323   | Armor                 | DTS    | 0.02 (%)   | 5   | defense_threshold_shift +100 (×1000) |
+
+Stored modifier values for Zephyr (kami #43, 0 equipment):
+
+```
+strain_boost              = -125     (= -12.5%)
+harvest_fertility_boost   = 0
+harvest_intensity_boost   = 20       (= 20 Musu/hr)
+harvest_bounty_boost      = 0
+rest_recovery_boost       = 0
+cooldown_shift            = 0        (seconds)
+attack_threshold_shift    = 0        (×1000)
+attack_threshold_ratio    = 0        (×1000)
+attack_spoils_ratio       = 0        (×1000)
+defense_threshold_shift   = 200      (= 20.0%)
+defense_threshold_ratio   = 0        (×1000)
+defense_salvage_ratio     = 0        (×1000)
+```
+
+These are the values the populator must produce for kami #43 on the
+post-backfill `kami_static` row. Founder spot-check the in-game
+Zephyr UI for SB ≈ -12.5% and DTS ≈ +20% before the populator runs
+across all 7,020 kamis.
+
+## Probe artifacts
+
+Probes used to reach this conclusion (preserved as `/tmp/probe_*.py`,
+not committed since one-shot exploratory scripts):
+
+- `probe_modifier_components.py`  — 43 candidate `component.<modifier>`
+  names, 0 hits in components registry.
+- `probe_bonus_components.py`     — found `component.id.holder` and
+  `component.id.anchor` (bonus-system anchors).
+- `probe_zephyr_owned_skills_components.py` — owned skill entities
+  carry IDOwnsSkill + IndexSkill + SkillPoint only; no Type/Value.
+- `probe_anchor_lookup.py`        — IDAnchor.getEntitiesWithValue
+  returns 2 bonus entities per skill, but bonuses also lack
+  Type/Value.
+- `probe_bonus_raw.py`            — `Type.has(bonus) = False`,
+  `Value.has(bonus) = False`, only `Level` + `IDAnchor` set on bonuses.
+- `probe_skill_proto_fast.py`     — `IndexSkillComponent.getEntitiesWithValue`
+  reverts; component is non-indexed.
+
+## Equipment effect convention (items.csv)
+
+Equipment effects in `items.csv` use the same effect keys with prefix
+variants:
+
+  | catalog string | maps to | unit          |
+  |----------------|---------|---------------|
+  | `E_HEALTH+N`   | SHS     | Stat          |
+  | `E_POWER+N`    | SPS     | Stat          |
+  | `E_HARMONY+N`  | SYS     | Stat          |
+  | `E_VIOLENCE+N` | SVS     | Stat          |
+  | `E_HFB+N%`     | HFB     | Percent (×1000) |
+  | `E_HIB+N` or `E_HIB+NP` | HIB | Musu/hr       |
+  | `E_HBB+N%` or `E_BOUNTY+N%` | HBB | Percent (×1000) |
+  | `E_DTS+N%`    | DTS     | Percent (×1000) |
+  | `E_DSR+N%`    | DSR     | Percent (×1000) |
+  | `E_ATS+N%`    | ATS     | Percent (×1000) |
+  | `E_ASR+N%`    | ASR     | Percent (×1000) |
+  | `RMB+N%`      | RMB     | Percent (×1000) |
+
+Equipment level multiplier = 1 (no level on equipment instances).
+
+Zephyr has 0 equipment, so the equipment walk contributes nothing to
+the cross-check — but it is wired in for the broader population.
+
+## Operational implication
+
+Per-kami chain calls in the modifier populator: ZERO — modifier values
+are computed from Session 10's already-fetched `skills_json` and
+`equipment_json` plus a single in-process catalog cache loaded once at
+populator startup. This is a pure-aggregation extension, not a new
+chain workload. The "+30–60 min on the daily sweep" guess in the
+Session 11 prompt was conservative — actual added cost is ~seconds
+(catalog load + per-kami arithmetic).
