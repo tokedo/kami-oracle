@@ -27,20 +27,39 @@ import datetime as dt
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable
 
+from eth_utils import keccak
 from web3 import Web3
 
 from .chain_client import ChainClient
 from .storage import Storage
-from .system_registry import SystemRegistry, load_abi
+from .system_registry import REGISTRY_ABI, SystemRegistry, load_abi
 
 log = logging.getLogger(__name__)
 
 # Address-cast: account_id is uint256(uint160(owner_address)), so the low 160
 # bits ARE the address. Masking gives us the wallet without an extra eth_call.
 _ADDRESS_MASK = (1 << 160) - 1
+
+
+def _stat_total(base: int, shift: int, boost: int) -> int:
+    """Effective stat scalar from the (base, shift, boost, sync) tuple.
+
+    Formula per ``kamigotchi-context/systems/state-reading.md`` and
+    ``health.md``, used by every Kamigotchi client and applied identically
+    to health / power / harmony / violence / slots:
+
+        effective = max(0, floor((1000 + boost) * (base + shift) / 1000))
+
+    The ``sync`` field is the last-synced *current* depletable value (HP
+    only) — not part of the build snapshot.
+    """
+    raw = (1000 + boost) * (base + shift)
+    if raw <= 0:
+        return 0
+    return raw // 1000
 
 
 @dataclass
@@ -62,6 +81,19 @@ class KamiStatic:
     base_power: int | None
     base_harmony: int | None
     base_violence: int | None
+    # Session 10 build snapshot fields. All optional — populator writes
+    # them on success, leaves NULL + sets build_refreshed_ts on per-kami
+    # build-fetch failure so the row isn't infinite-retried.
+    level: int | None = None
+    xp: int | None = None
+    total_health: int | None = None
+    total_power: int | None = None
+    total_violence: int | None = None
+    total_harmony: int | None = None
+    total_slots: int | None = None
+    skills_json: str | None = None
+    equipment_json: str | None = None
+    build_refreshed_ts: dt.datetime | None = None
 
 
 # GetterSystem.getAccount(uint256) is documented in
@@ -102,8 +134,13 @@ def _kami_shape_to_static(kami_id: str, shape: tuple) -> KamiStatic:
 
     stats   = (health, power, harmony, violence) where each = (base, shift, boost, sync)
     traits  = (face, hand, body, background, color)
+
+    Resolves the per-stat effective totals via the canonical game formula
+    ``floor((1000 + boost) * (base + shift) / 1000)`` and persists ``level``
+    and ``xp`` directly. Slots / skills / equipment require additional
+    component reads — handled by ``KamiStaticReader._fetch_build_extras``.
     """
-    _id, kami_index, name, _media, stats, traits, affinities, account, _lvl, _xp, _room, _state = shape
+    _id, kami_index, name, _media, stats, traits, affinities, account, level, xp, _room, _state = shape
 
     health, power, harmony, violence = stats
     face, hand, body, background, color = traits
@@ -129,11 +166,45 @@ def _kami_shape_to_static(kami_id: str, shape: tuple) -> KamiStatic:
         base_power=int(power[0]),
         base_harmony=int(harmony[0]),
         base_violence=int(violence[0]),
+        level=int(level),
+        xp=int(xp),
+        total_health=_stat_total(int(health[0]), int(health[1]), int(health[2])),
+        total_power=_stat_total(int(power[0]), int(power[1]), int(power[2])),
+        total_harmony=_stat_total(int(harmony[0]), int(harmony[1]), int(harmony[2])),
+        total_violence=_stat_total(int(violence[0]), int(violence[1]), int(violence[2])),
     )
 
 
+_WORLD_COMPONENTS_ABI = [
+    {
+        "name": "components",
+        "type": "function",
+        "inputs": [],
+        "outputs": [{"type": "address"}],
+        "stateMutability": "view",
+    },
+]
+
+# Build-fetch components, with the ABI filename to attach. Each is resolved
+# at reader construction via the world.components() registry — the same
+# getEntitiesWithValue(uint256) pattern as systems but against a different
+# registry contract. See memory/decoder-notes.md "Session 10 — build fields
+# on chain" for resolved addresses observed during discovery.
+_BUILD_COMPONENTS: list[tuple[str, str]] = [
+    ("component.stat.slots", "SlotsComponent.json"),
+    ("component.id.skill.owns", "IDOwnsSkillComponent.json"),
+    ("component.index.skill", "IndexSkillComponent.json"),
+    ("component.skill.point", "SkillPointComponent.json"),
+    # Equipment-owns reuses the IDOwnsSkillComponent ABI shape
+    # (uint256 -> uint256[]); it is resolvable on chain even though the
+    # vendored components.json cheat sheet omits it.
+    ("component.id.equipment.owns", "IDOwnsSkillComponent.json"),
+    ("component.index.item", "IndexItemComponent.json"),
+]
+
+
 class KamiStaticReader:
-    """Wraps the GetterSystem contract.
+    """Wraps the GetterSystem contract + per-kami build component reads.
 
     Constructed once at startup; reuses a single ``ChainClient``. eth_call
     failures (revert, timeout) bubble up to the caller — backfill / refresh
@@ -142,7 +213,9 @@ class KamiStaticReader:
     Account lookups (`getAccount`) are cached on the reader instance so a
     population pass across many kamis sharing one operator (e.g. bpeon
     owns dozens) makes one chain call per distinct ``account_id``, not
-    one per kami.
+    one per kami. Build extras (slots / skills / equipment) are per-kami
+    by definition and are NOT cached across kamis; the per-pass cache
+    only covers account lookups.
     """
 
     def __init__(self, client: ChainClient, registry: SystemRegistry, abi_dir):
@@ -162,6 +235,70 @@ class KamiStaticReader:
             abi=abi,
         )
         self._account_cache: dict[str, tuple[int | None, str | None]] = {}
+        # Resolve build-component contracts via world.components(). Held as
+        # web3 contract objects keyed by short name so _fetch_build_extras
+        # can dispatch without re-resolving.
+        self._build_components = self._resolve_build_components(client, registry, abi_dir)
+
+    def _resolve_build_components(
+        self, client: ChainClient, registry: SystemRegistry, abi_dir,
+    ) -> dict[str, "Web3.eth.contract"]:
+        """Resolve component contract addresses via world.components().
+
+        Returns a dict keyed by short name (e.g. ``"slots"``, ``"skills_owns"``)
+        whose values are web3 contract objects bound to the ABI. A name that
+        fails to resolve maps to ``None`` — the build-extras path tolerates
+        missing components and just leaves the corresponding column NULL.
+        """
+        # Re-derive world address from any registered SystemInfo — the
+        # getter info gives us one, and the world has a stable address per
+        # config. Cleaner: pull from the same place serve.py does
+        # (config.world_address). To avoid threading config in here, we use
+        # the world_address we already have via the registry's connection
+        # to the getter's contract — instead, take it from the chain by
+        # asking any known World-side component via the same w3 instance.
+        from .config import load_config  # noqa: PLC0415 — avoid circular at import
+
+        cfg = load_config()
+        world = client.w3.eth.contract(
+            address=Web3.to_checksum_address(cfg.world_address),
+            abi=_WORLD_COMPONENTS_ABI,
+        )
+        components_addr = client.call_contract_fn(world, "components")
+        components_registry = client.w3.eth.contract(
+            address=Web3.to_checksum_address(components_addr),
+            abi=REGISTRY_ABI,
+        )
+        log.info(
+            "kami_static: world.components() = %s (resolving %d build components)",
+            components_addr, len(_BUILD_COMPONENTS),
+        )
+
+        out: dict[str, object] = {}
+        short_name_map = {
+            "component.stat.slots": "slots",
+            "component.id.skill.owns": "skills_owns",
+            "component.index.skill": "skill_index",
+            "component.skill.point": "skill_point",
+            "component.id.equipment.owns": "equip_owns",
+            "component.index.item": "item_index",
+        }
+        for full_name, abi_filename in _BUILD_COMPONENTS:
+            short = short_name_map[full_name]
+            name_hash = int.from_bytes(keccak(text=full_name), "big")
+            entities = client.call_contract_fn(
+                components_registry, "getEntitiesWithValue", name_hash,
+            )
+            if not entities:
+                log.warning("kami_static: component %s did not resolve", full_name)
+                out[short] = None
+                continue
+            addr = Web3.to_checksum_address("0x" + format(entities[0], "040x"))
+            out[short] = client.w3.eth.contract(
+                address=addr, abi=load_abi(abi_dir, abi_filename),
+            )
+            log.info("kami_static: %s -> %s", full_name, addr)
+        return out
 
     def fetch(self, kami_id: str) -> KamiStatic:
         kid_int = int(kami_id)
@@ -171,7 +308,75 @@ class KamiStaticReader:
             idx, name = self.fetch_account(row.account_id)
             row.account_index = idx
             row.account_name = name
+        # Build extras — per-kami component reads. Failures here leave the
+        # respective columns NULL but still set build_refreshed_ts so we
+        # don't infinite-retry a permanently-broken kami.
+        try:
+            extras = self._fetch_build_extras(kid_int)
+            row.total_slots = extras.get("total_slots")
+            row.skills_json = extras.get("skills_json")
+            row.equipment_json = extras.get("equipment_json")
+        except Exception as e:  # noqa: BLE001
+            log.warning("kami_static: build_extras(%s) failed: %s", kami_id, e)
+        row.build_refreshed_ts = dt.datetime.now(tz=dt.timezone.utc)
         return row
+
+    def _fetch_build_extras(self, kid_int: int) -> dict[str, object]:
+        """Read slots / skills / equipment for one kami.
+
+        Returns a dict with keys ``total_slots`` (int|None), ``skills_json``
+        (str|None), ``equipment_json`` (str|None). Per-component failures
+        are logged at DEBUG and leave the corresponding key absent (caller
+        treats absent as NULL).
+        """
+        out: dict[str, object] = {}
+
+        # Slots — (base, shift, boost, sync) tuple, formula-resolved.
+        slots = self._build_components.get("slots")
+        if slots is not None:
+            try:
+                tup = self.client.call_contract_fn(slots, "safeGet", kid_int)
+                out["total_slots"] = _stat_total(int(tup[0]), int(tup[1]), int(tup[2]))
+            except Exception as e:  # noqa: BLE001
+                log.debug("kami_static: SlotsComponent.safeGet(%d) failed: %s", kid_int, e)
+
+        # Skills — enumerate then read index + points per skill instance.
+        skills_owns = self._build_components.get("skills_owns")
+        skill_index = self._build_components.get("skill_index")
+        skill_point = self._build_components.get("skill_point")
+        if skills_owns is not None and skill_index is not None and skill_point is not None:
+            try:
+                ents = list(self.client.call_contract_fn(
+                    skills_owns, "getEntitiesWithValue", kid_int,
+                ))
+                skills: list[dict[str, int]] = []
+                for sid in ents:
+                    sidx = int(self.client.call_contract_fn(skill_index, "safeGet", sid))
+                    spt = int(self.client.call_contract_fn(skill_point, "safeGet", sid))
+                    skills.append({"index": sidx, "points": spt})
+                out["skills_json"] = json.dumps(skills)
+            except Exception as e:  # noqa: BLE001
+                log.debug("kami_static: skills enumeration(%d) failed: %s", kid_int, e)
+
+        # Equipment — enumerate then read item_index per equip instance.
+        # Slot-name resolution (component.for.string) deferred — does not
+        # resolve in the current registry snapshot.
+        equip_owns = self._build_components.get("equip_owns")
+        item_index = self._build_components.get("item_index")
+        if equip_owns is not None and item_index is not None:
+            try:
+                ents = list(self.client.call_contract_fn(
+                    equip_owns, "getEntitiesWithValue", kid_int,
+                ))
+                equips: list[int] = []
+                for eid in ents:
+                    iidx = int(self.client.call_contract_fn(item_index, "safeGet", eid))
+                    equips.append(iidx)
+                out["equipment_json"] = json.dumps(equips)
+            except Exception as e:  # noqa: BLE001
+                log.debug("kami_static: equipment enumeration(%d) failed: %s", kid_int, e)
+
+        return out
 
     def fetch_account(self, account_id: str) -> tuple[int | None, str | None]:
         """Look up (account_index, account_name) for a uint256 account id.
@@ -219,6 +424,10 @@ def upsert_kami_static(storage: Storage, rows: Iterable[KamiStatic]) -> int:
             r.body, r.hand, r.face, r.background, r.color,
             json.dumps(r.affinities) if r.affinities is not None else None,
             r.base_health, r.base_power, r.base_harmony, r.base_violence,
+            r.level, r.xp,
+            r.total_health, r.total_power, r.total_violence, r.total_harmony,
+            r.total_slots, r.skills_json, r.equipment_json,
+            r.build_refreshed_ts,
             now, now,
         )
         for r in rows
@@ -231,8 +440,13 @@ def upsert_kami_static(storage: Storage, rows: Iterable[KamiStatic]) -> int:
                  account_index, account_name,
                  body, hand, face, background, color, affinities,
                  base_health, base_power, base_harmony, base_violence,
+                 level, xp,
+                 total_health, total_power, total_violence, total_harmony,
+                 total_slots, skills_json, equipment_json,
+                 build_refreshed_ts,
                  first_seen_ts, last_refreshed_ts)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (kami_id) DO UPDATE SET
                 kami_index = excluded.kami_index,
                 name = excluded.name,
@@ -250,6 +464,16 @@ def upsert_kami_static(storage: Storage, rows: Iterable[KamiStatic]) -> int:
                 base_power = excluded.base_power,
                 base_harmony = excluded.base_harmony,
                 base_violence = excluded.base_violence,
+                level = excluded.level,
+                xp = excluded.xp,
+                total_health = excluded.total_health,
+                total_power = excluded.total_power,
+                total_violence = excluded.total_violence,
+                total_harmony = excluded.total_harmony,
+                total_slots = excluded.total_slots,
+                skills_json = excluded.skills_json,
+                equipment_json = excluded.equipment_json,
+                build_refreshed_ts = excluded.build_refreshed_ts,
                 last_refreshed_ts = excluded.last_refreshed_ts
             """,
             payload,
