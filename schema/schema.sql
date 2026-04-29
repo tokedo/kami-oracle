@@ -278,3 +278,35 @@ CREATE TABLE IF NOT EXISTS items_catalog (
 --   LEFT JOIN items_catalog i ON i.item_index = je.value
 --   WHERE s.equipment_json IS NOT NULL AND s.equipment_json != '[]';
 -- ---------------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------------
+-- skills_catalog (Session 14): static catalog mirrored from
+-- kami_context/catalogs/skills.csv. Re-loaded only when kami_context is
+-- re-vendored (or on service startup if the table is empty), not on
+-- every poll. Used by the kami_skills view to resolve per-skill effect /
+-- tree / tier details so the agent doesn't re-derive from skills.csv
+-- inline. The first CSV column is a leading blank cell (UTF-8 BOM +
+-- dot) — the loader skips it via DictReader keyed on named columns.
+-- value is VARCHAR (not numeric) because skill effects mix integer
+-- counts, signed percent values (e.g. "0.02"), and decimals — keeping
+-- the chain string verbatim avoids parse loss on edge cases.
+-- exclusion stores the raw CSV cell (e.g. "132, 133") for
+-- mutually-exclusive sibling skill_index lists; enforcement lives
+-- in chain logic.
+-- Loader: ingester/skills_catalog.py.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS skills_catalog (
+    skill_index  INTEGER PRIMARY KEY,
+    name         VARCHAR NOT NULL,
+    tree         VARCHAR NOT NULL,   -- Predator | Guardian | Harvester | Enlightened
+    tier         INTEGER,
+    tree_req     INTEGER,            -- prereq points in tree
+    max_rank     INTEGER,
+    cost         INTEGER,            -- skill point cost per rank
+    effect       VARCHAR,            -- effect key: SHS / HFB / SB / ...
+    value        VARCHAR,            -- per-rank value (string — signed/decimal possible)
+    units        VARCHAR,            -- Stat | Percent | Sec | Musu/hr | ...
+    exclusion    VARCHAR,            -- mutually-exclusive sibling skill_index list, if any
+    description  VARCHAR,
+    loaded_ts    TIMESTAMP NOT NULL
+);
