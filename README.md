@@ -207,14 +207,21 @@ catalog into DuckDB and expose a view that joins it.
   with a `room_index` column resolved at load time (Session 14
   discovery: `room_index = node_index` for every in-game node).
   Reload: `python -m ingester.nodes_catalog --reload`.
-- **`kami_current_location`** — view. Per-kami latest-known room
-  derived from the most recent harvest_* action. Joins
-  `nodes_catalog` for `room_index`. **Not live truth** — `move`
-  actions are account-level on chain (kami_id NULL on the row)
-  and excluded today; `is_stale = TRUE` (threshold 30 min) means
-  verify against chain via Kamibots before any destructive op
-  keyed on location. Cold-start kamis (no harvest in 28d) appear
-  with NULL location columns.
+- **`kami_current_location`** — view. Per-kami current physical
+  location IF the kami is currently on a node (mid-harvest).
+  **Kamis don't move on chain — operators do.** A kami is on a
+  node iff currently harvesting; otherwise it's in its operator's
+  pocket. Columns: `currently_harvesting` (BOOLEAN),
+  `current_node_id` / `current_room_index` (NULL when not
+  harvesting), `last_harvest_node_id` / `last_harvest_start_ts`
+  (where the kami was last seen on a node, regardless of current
+  state), `since_ts`, `freshness_seconds`, `is_stale` (NULL when
+  not harvesting; TRUE when active signal >30 min old). Resting
+  kami's physical room is the *operator's* room — derivable by
+  joining `kami_static.account_id` against the operator's latest
+  `move` action; that join is intentionally not bundled here.
+  Verify against chain via Kamibots for destructive ops keyed
+  on location.
 
 ```sql
 -- Per-kami skill loadout, resolved.
@@ -223,16 +230,22 @@ FROM kami_skills
 WHERE kami_index = 1186
 ORDER BY tree, tier;
 
--- Current location of an entire roster.
-SELECT kami_index, current_room_index, current_node_id,
-       source_action_type, freshness_seconds, is_stale
+-- Kamis currently on node 86, fresh signal.
+SELECT kami_index, name, since_ts, freshness_seconds
 FROM kami_current_location
-WHERE kami_index IN (1186, 1745, 2418, 2465);
+WHERE currently_harvesting AND current_node_id = 86
+  AND NOT is_stale;
+
+-- "Where is my roster?" — handle harvesting vs resting honestly.
+SELECT kami_index, currently_harvesting, current_node_id,
+       last_harvest_node_id, freshness_seconds, is_stale
+FROM kami_current_location
+WHERE kami_index IN (1186, 2418);
 ```
 
 See `memory/decoder-notes.md` "Session 14 — skills_catalog +
-nodes_catalog + views" for the discovery write-up (including the
-move-attribution gap and node→room Index identity).
+nodes_catalog + views" and "Session 14.5 — kami_current_location
+semantic correction" for the discovery write-up.
 
 ## MUSU semantics (read once)
 

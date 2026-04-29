@@ -145,18 +145,23 @@ Canonical definitions live in `schema/schema.sql`. Summary:
   (PK), `name`, `status`, `drops`, `affinity`, `level_limit`,
   `yield_index`, `scav_cost`, `room_index`, `loaded_ts`. Reload:
   `python -m ingester.nodes_catalog --reload`.
-- **`kami_current_location`** (Session 14, view): per-kami latest-
-  known room derived from the most recent `harvest_start` action.
-  Among harvest_*, only `harvest_start` carries `node_id`
-  (stop / collect / liquidate decode harvest_id only). Joins
-  `nodes_catalog` for `room_index`. Columns: `kami_id`,
-  `kami_index`, `name`, `account_name`, `current_room_index`,
-  `current_node_id`, `source_action_type`, `since_ts`,
-  `freshness_seconds`, `is_stale` (1800s = 30 min). **Not live
-  truth** — `move` is account-level on chain (kami_id NULL on the
-  row), so account moves can shift kamis without us attributing
-  per-kami. Verify with chain via Kamibots before destructive
-  ops keyed on location. Cold-start kamis get NULL location.
+- **`kami_current_location`** (Session 14, view; corrected
+  Session 14.5): per-kami current physical location IF currently
+  harvesting (kamis don't move on chain — operators do; a kami is
+  on a node iff mid-harvest, otherwise in its operator's pocket).
+  Columns: `kami_id`, `kami_index`, `name`, `account_name`,
+  `currently_harvesting` (BOOLEAN), `current_node_id` /
+  `current_room_index` (NULL when not harvesting),
+  `last_harvest_node_id` / `last_harvest_start_ts` ("where last
+  seen on a node"), `since_ts`, `freshness_seconds`, `is_stale`
+  (NULL when not harvesting; TRUE at 1800s = 30 min). End-of-
+  harvest set: `harvest_stop` (kami_id direct) + `harvest_liquidate`
+  (victim, resolved via harvest_id self-join — kami_id on liquidate
+  row is the *killer*). `harvest_collect` does NOT end harvesting.
+  Resting-kami physical location = the operator's current room
+  (separate join via `kami_static.account_id` against operator's
+  latest `move`; intentionally not bundled in this view). Verify
+  with Kamibots before destructive ops keyed on location.
 - **`ingest_cursor`**: ops state. Last committed block, vendor
   version, schema version.
 
