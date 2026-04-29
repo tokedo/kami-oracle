@@ -243,3 +243,141 @@ prompt. Do not re-litigate without revisiting that rationale:
 4. **No pet-specific column or view.** Pets are a slot kind, not
    a special case. `kami_equipment WHERE slot_type = 'Kami_Pet_Slot'`
    is the canonical access pattern.
+
+## Hand-off to human (blocklife-ai) — Session 14 (2026-04-29)
+
+Three follow-ups for the founder. Same pattern as Sessions 12/13:
+oracle-side work is shipped on `main` (schema_version 12); the
+doc edit lives in the kami-agent repo and the founder applies it
+there; the same sweep applies in kami-zero (the autonomous VM)
+because both consume the oracle via the same MCP path per ADR-006.
+
+### 7a. Updates to `kami-agent/integration/oracle.md`
+
+Three edits, in the existing schema cheat-sheet section:
+
+**1. New `kami_skills` view section** — add right after the
+existing `kami_static` skills mention:
+
+> ### `kami_skills` — per-skill effect details
+>
+> A view (Session 14). One row per (kami, invested skill) per
+> `skills_json` entry. Joins `kami_static.skills_json` against
+> `skills_catalog` (a static mirror of
+> `kami_context/catalogs/skills.csv`) so the agent doesn't
+> re-derive "skill 212 = +10 HP / rank, skill 222 = +2% DTS /
+> rank" from the catalog inline.
+>
+> Columns: `kami_id`, `kami_index`, `name`, `account_name`,
+> `skill_index`, `skill_name`, `tree`
+> (Predator/Guardian/Harvester/Enlightened), `tier`, `points`,
+> `effect`, `value`, `units`, `freshness_seconds`, `is_stale`
+> (36h, same as `kami_equipment`).
+>
+> Per-tree point totals: `SELECT tree, SUM(points) FROM
+> kami_skills WHERE kami_id = X GROUP BY tree`. Archetype
+> classification stays in agent code — oracle exposes the
+> components, not the label. Rationale: same as Session 13's
+> rejected `kami_pet_inferred` — no hidden thresholds in oracle
+> SQL.
+
+**2. New `kami_current_location` view section** — add in a new
+"Live-ish state" subsection (or near `kami_equipment`):
+
+> ### `kami_current_location` — latest-known room
+>
+> A view (Session 14). For each kami, picks the most recent
+> `harvest_start` action and resolves the room via
+> `nodes_catalog`. Replaces the prior workaround of reading
+> `harvest.node.roomIndex` from a live `get_kami_state` call
+> (which returns the *last-harvested* node, not the kami's
+> actual current room).
+>
+> Columns: `kami_id`, `kami_index`, `name`, `account_name`,
+> `current_room_index`, `current_node_id`,
+> `source_action_type` (always `harvest_start` today),
+> `since_ts`, `freshness_seconds`, `is_stale`.
+>
+> **Not live truth.** The view restricts to `harvest_start`
+> because among the harvest action family, only `harvest_start`
+> carries `node_id` (stop / collect / liquidate decode
+> harvest_id only). `move` actions are excluded entirely —
+> `system.account.move` is account-level on chain, so
+> `kami_action.move` rows have `kami_id` NULL. An account-level
+> move can shift a kami to a new room without us attributing
+> it to that specific kami. `is_stale = TRUE` (>30 min) means
+> the agent should verify the room against chain via Kamibots
+> before any destructive op keyed on location. Cold-start
+> kamis (no `harvest_start` in the 28d window) appear with
+> NULL location columns — same shape as the `kami_equipment`
+> stale handling.
+
+**3. Sundown the "raw skills_json" workaround** — rewrite the
+existing `skills_json` description on `kami_static` to:
+
+> Use the `kami_skills` view for resolved per-skill details.
+> Raw `skills_json` remains available for callers that want
+> the original chain payload.
+
+### 7b. kami-agent + kami-zero integration sweep
+
+Same hand-off pattern applies to **both** agent codebases:
+
+- **kami-agent** (`~/kami-agent`): wherever the agent currently
+  re-derives skill effects inline against `skills.csv` or peeks
+  at `harvest.node.roomIndex` for current room, swap to
+  `kami_skills` / `kami_current_location` queries. Founder runs
+  this sweep after applying 7a.
+- **kami-zero** (autonomous VM, `blocklife-ai`): same sweep.
+  kami-zero's perception loop should similarly drop any inline
+  `skills.csv` joining or harvest-room peeking. Founder
+  coordinates the rollout via the standing collaboration mode
+  (ssh / scp / git path).
+
+### 7c. Session 15+ candidates (do NOT pre-build)
+
+The Session 13 queue (Sessions 15 / 16 / 17 / 18) carries forward
+unchanged — see the Session 13 section above. Session 14 itself
+is now closed. Inheritable rejections from Session 14 (do not
+re-litigate without revisiting the rationale in the Session 14
+prompt):
+
+1. **No `archetype` column / view** (Guardian / Predator /
+   Harvester / Hybrid classification). Categorical labels with
+   hidden thresholds — same anti-pattern as Session 13's
+   rejected `kami_pet_inferred`. The agent gets the components
+   (per-tree point totals from `kami_skills`) and classifies in
+   its own code where the heuristic is visible.
+2. **No `tier3_choice` / `tier6_choice` columns** — "which
+   skill at tier 3" is one `WHERE tier = 3` away in
+   `kami_skills`. Don't bake tree-specific column names into
+   schema.
+3. **No `total_hp_from_skills` / `total_dts_pct_from_skills`
+   summed columns.** The agent already has resolved totals in
+   `kami_static.total_health` (Session 10) and the 12 modifier
+   columns (Session 11). What was missing was the *attribution*
+   — per-skill breakdown — which `kami_skills` provides as
+   rows. Sums are a `GROUP BY` away.
+4. **No live chain getter for current room from `/sql`.**
+   Oracle stays read-only against chain. `kami_current_location`
+   is a derivation from observed action history with an
+   explicit `is_stale` flag. Live-truth verification belongs in
+   the agent against Kamibots — same boundary as Session 13's
+   equipment freshness story.
+5. **No per-tree skill-point columns on `kami_static`** (e.g.
+   `predator_points`). Derive in SQL via GROUP BY — storing as
+   columns means a backfill every time a kami respecs and
+   another redundancy with `kami_static`.
+
+### 7d. Known gap — move attribution (carry forward)
+
+`system.account.move` is account-level on chain — `kami_action.move`
+rows have `kami_id` NULL because the chain call has no per-kami
+binding. ~10k move rows in the 28d window vs ~390k harvest rows.
+A kami that moves without harvesting on the new node will surface
+as stale or NULL in `kami_current_location`. Fixing this requires
+a snapshot-time account-membership resolution in the decoder
+(fan out one row per kami of the moving account, at the move's
+block) — meaningful refactor, not Session 14 scope. Re-evaluate
+if the agent's real-world traffic shows it matters; the
+verify-before-act discipline covers it for now.
