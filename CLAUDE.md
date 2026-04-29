@@ -120,6 +120,43 @@ Canonical definitions live in `schema/schema.sql`. Summary:
   is 36h (129600s). `is_stale = TRUE` ⇒ verify against live chain
   via Kamibots before any destructive op (snapshot lag means
   equipment can false-positive).
+- **`skills_catalog`** (Session 14): static mirror of
+  `kami_context/catalogs/skills.csv`. `skill_index` (PK), `name`,
+  `tree` (Predator / Guardian / Harvester / Enlightened), `tier`,
+  `tree_req`, `max_rank`, `cost`, `effect` (SHS / HFB / SB / ...),
+  `value` (per-rank value, VARCHAR), `units`, `exclusion`,
+  `description`, `loaded_ts`. Re-loaded only when `kami_context`
+  is re-vendored — `python -m ingester.skills_catalog --reload`
+  is the founder's command. Loader is **not** in the per-poll path.
+- **`kami_skills`** (Session 14, view): one row per (kami, invested
+  skill) per `skills_json` entry. Joins `kami_static.skills_json`
+  (UNNEST'd via direct STRUCT cast) against `skills_catalog` on
+  `skill_index`. Columns: `kami_id`, `kami_index`, `name`,
+  `account_name`, `skill_index`, `skill_name`, `tree`, `tier`,
+  `points`, `effect`, `value`, `units`, `build_refreshed_ts`,
+  `freshness_seconds`, `is_stale` (36h, same as `kami_equipment`).
+  Per-tree point sums and archetype labels intentionally NOT stored
+  — derive sums via `GROUP BY tree`; archetype classification stays
+  in agent code where the heuristic is visible.
+- **`nodes_catalog`** (Session 14): static mirror of
+  `kami_context/catalogs/nodes.csv` augmented with a `room_index`
+  resolved at load (Index identity against rooms.csv: every
+  in-game node has a same-Index, same-Name room). `node_index`
+  (PK), `name`, `status`, `drops`, `affinity`, `level_limit`,
+  `yield_index`, `scav_cost`, `room_index`, `loaded_ts`. Reload:
+  `python -m ingester.nodes_catalog --reload`.
+- **`kami_current_location`** (Session 14, view): per-kami latest-
+  known room derived from the most recent `harvest_start` action.
+  Among harvest_*, only `harvest_start` carries `node_id`
+  (stop / collect / liquidate decode harvest_id only). Joins
+  `nodes_catalog` for `room_index`. Columns: `kami_id`,
+  `kami_index`, `name`, `account_name`, `current_room_index`,
+  `current_node_id`, `source_action_type`, `since_ts`,
+  `freshness_seconds`, `is_stale` (1800s = 30 min). **Not live
+  truth** — `move` is account-level on chain (kami_id NULL on the
+  row), so account moves can shift kamis without us attributing
+  per-kami. Verify with chain via Kamibots before destructive
+  ops keyed on location. Cold-start kamis get NULL location.
 - **`ingest_cursor`**: ops state. Last committed block, vendor
   version, schema version.
 

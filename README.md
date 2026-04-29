@@ -176,6 +176,64 @@ WHERE account_name = 'fey'
 See `memory/decoder-notes.md` "Session 13 — items_catalog +
 kami_equipment view" for the slot-resolution rule and rationale.
 
+## Resolved skills + current location: `skills_catalog` / `nodes_catalog` / views (Session 14)
+
+`skills_json` on `kami_static` is a JSON array of raw
+`{index, points}` entries — chain-faithful but effect-anonymous;
+the agent had to re-derive "skill 212 = +10 HP/rank, skill 222 =
++2% DTS/rank" inline against `skills.csv` every session. Current
+room had a parallel gap: agents fell back to
+`harvest.node.roomIndex` from a live `get_kami_state` call, which
+returns the *last-harvested* node, not the kami's actual current
+room. Same Session 13 fix shape, twice: mirror a small static
+catalog into DuckDB and expose a view that joins it.
+
+- **`skills_catalog`** — table. One row per skill in
+  `skills.csv`. Columns: `skill_index` (PK), `name`, `tree`
+  (Predator / Guardian / Harvester / Enlightened), `tier`,
+  `tree_req`, `max_rank`, `cost`, `effect` (SHS / HFB / SB / ...),
+  `value`, `units`, `exclusion`, `description`, `loaded_ts`.
+  Reload: `python -m ingester.skills_catalog --reload` after
+  re-vendoring `kami_context`.
+- **`kami_skills`** — view. One row per (kami, invested skill)
+  per `skills_json` entry. Joins `skills_catalog` to expose
+  `skill_name` / `tree` / `tier` / `effect` / `value` / `units`.
+  Includes `freshness_seconds` and `is_stale` derived from
+  `build_refreshed_ts` (threshold 36h, same as `kami_equipment`).
+  Per-tree point sums and archetype labels are intentionally NOT
+  stored — derive sums via `GROUP BY tree`; archetype
+  classification stays in agent code.
+- **`nodes_catalog`** — table. Mirror of `nodes.csv` augmented
+  with a `room_index` column resolved at load time (Session 14
+  discovery: `room_index = node_index` for every in-game node).
+  Reload: `python -m ingester.nodes_catalog --reload`.
+- **`kami_current_location`** — view. Per-kami latest-known room
+  derived from the most recent harvest_* action. Joins
+  `nodes_catalog` for `room_index`. **Not live truth** — `move`
+  actions are account-level on chain (kami_id NULL on the row)
+  and excluded today; `is_stale = TRUE` (threshold 30 min) means
+  verify against chain via Kamibots before any destructive op
+  keyed on location. Cold-start kamis (no harvest in 28d) appear
+  with NULL location columns.
+
+```sql
+-- Per-kami skill loadout, resolved.
+SELECT skill_name, tree, tier, points, effect, value, units
+FROM kami_skills
+WHERE kami_index = 1186
+ORDER BY tree, tier;
+
+-- Current location of an entire roster.
+SELECT kami_index, current_room_index, current_node_id,
+       source_action_type, freshness_seconds, is_stale
+FROM kami_current_location
+WHERE kami_index IN (1186, 1745, 2418, 2465);
+```
+
+See `memory/decoder-notes.md` "Session 14 — skills_catalog +
+nodes_catalog + views" for the discovery write-up (including the
+move-attribution gap and node→room Index identity).
+
 ## MUSU semantics (read once)
 
 `kami_action.amount` is **gross MUSU pre-tax** — the integer
