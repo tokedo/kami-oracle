@@ -1575,3 +1575,91 @@ the same column (decoder.py:192). When the view joins
 join only makes semantic sense for `harvest_*` rows. By dropping
 `move` from the source set we sidestep the issue cleanly — the
 join is unambiguous.
+
+## Session 14.5 — kami_current_location semantic correction
+
+Founder review of Session 14 surfaced a conceptual error in the
+view's framing. **Kamis don't move on chain.** Operators do. A
+kami is on a node iff currently *harvesting* on that node;
+otherwise it is in its operator's pocket (logically located
+wherever the operator is, not on any node). Account-level `move`
+actions are the operator's movement — harvesting kamis stay on
+their node, resting kamis follow the operator implicitly.
+
+That means the Session 14 view filtered to `harvest_start` only
+and never checked for a subsequent end-of-harvest action — so it
+conflated "last node placed on" with "current node on." The S14
+verification report's 95%-stale signal (6,556 of 6,963 with_loc
+rows stale) is what led to this correction. The **decoder note**
+about `move` being account-level (Session 14, line 1544) was
+correct — the bad framing was Session 14 calling that an "untracked
+kami movement gap." There is no kami-movement gap to cover; the
+gap was misinterpreting the mechanic.
+
+Session 14.5 redefines `kami_current_location` to honestly reflect
+this: `currently_harvesting` boolean, `current_node_id` /
+`current_room_index` NULL when not currently harvesting, plus
+`last_harvest_node_id` for the "where was this kami last seen on
+a node" question.
+
+### Session 14.5 — harvest action end-of-harvest semantics
+
+Verified via chain spot-check (`scripts/spot_check_harvest_state.py`
+on 2026-04-29 against `getKami(...).state` returning
+"RESTING" / "HARVESTING" / "DEAD"):
+
+| action_type        | Ends harvest? | Chain spot-check                          |
+|--------------------|---------------|-------------------------------------------|
+| `harvest_start`    | n/a (begins)  | (places kami on node)                     |
+| `harvest_collect`  | NO            | Kami "boom" idx=980 state=HARVESTING ✅    |
+| `harvest_stop`     | YES           | Kami idx=8441 state=RESTING ✅             |
+| `harvest_liquidate`| YES (victim)  | Victim idx=10001 state=DEAD ✅             |
+| (`die` / `revive`) | n/a           | Not in our `action_type` enum (no rows)   |
+
+Two implementation findings that diverge from the S14.5 prompt's
+working hypothesis:
+
+1. **`harvest_liquidate.kami_id` is the killer, not the victim.**
+   Decoder rule (`decoder.py:165-168`):
+   `killerID → kami_id`, `victimHarvID → harvest_id`.
+   `target_kami_id` is NULL on every liquidate row (1510 rows
+   surveyed). To attribute end-of-harvest to the victim, the
+   view self-joins liquidate.harvest_id back to a harvest_start
+   row of the same harvest_id (the bijective derivation
+   `harvest_id = keccak("harvest" || kami_id_be)` guarantees a
+   unique victim per harvest_id). The killer's own liquidate row
+   is NOT an end-of-harvest signal for the killer — confirmed by
+   spot-check: killer "Shirt Man" idx=2759 state=HARVESTING
+   immediately after committing a liquidate.
+
+2. **`die` / `revive` aren't in our decoder's action_type set.**
+   Distinct list: harvest_*, feed, gacha_*, item_*, lvlup,
+   listing_buy, move, quest_complete, register, scavenge_claim,
+   skill_*, kami_name, friend_*, droptable_reveal, goal_claim.
+   No `die` / `revive`. Chain has DEAD / state transitions but
+   we don't decode the system call(s) that emit them. Consequence
+   for the view: a kami that died from non-liquidate causes (HP
+   starvation outside a liquidate) won't have its harvest closed
+   in our records — a known false-positive for currently_harvesting.
+   Out of scope for S14.5 to fix (would need decoder + ABI work);
+   surfaced as a known gap in the corrected view's docstring.
+
+### Window-edge: long-running harvests started >7d ago
+
+A kami that has been harvesting continuously for longer than the
+rolling 1-week window will have **no `harvest_start` row in our
+window**, only `harvest_collect` / `harvest_liquidate` (killer)
+rows. Spot-check: killer "Shirt Man" 58264419… has zero
+harvest_start rows in window but `getKami(...).state =
+HARVESTING` and `room=16` per chain. The view treats `harvest_collect`
+as standalone evidence of currently_harvesting (last action across
+{start, collect} > last action across {stop, liquidate-victim}).
+But `current_node_id` is NULL in this case because we don't have
+the start to read the node from. `last_harvest_node_id` is also
+NULL (no start in window). The agent should treat
+`currently_harvesting=TRUE AND current_node_id IS NULL` as
+"harvesting on an unknown node — verify against chain via
+Kamibots." Magnitude: these are the long-running heavy-harvester
+kamis the agent often cares about, so this gap matters in
+practice. Window extension to 28d (CLAUDE.md "Window may extend")
+would shrink it.
