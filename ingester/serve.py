@@ -52,6 +52,7 @@ from .harvest_resolver import HarvestResolver
 from .ingest import process_block_range
 from .items_catalog import ensure_loaded as ensure_items_catalog_loaded
 from .skills_catalog import ensure_loaded as ensure_skills_catalog_loaded
+from .nodes_catalog import ensure_loaded as ensure_nodes_catalog_loaded
 from .kami_static import KamiStaticReader, refresh_stale
 from .poller import REGISTRY_REPROBE_INTERVAL_S
 from .storage import Storage, read_schema_sql
@@ -310,6 +311,10 @@ def main() -> int:
             ensure_skills_catalog_loaded(storage.conn, catalogs_dir)
         except Exception:
             log.exception("serve: skills_catalog initial load failed")
+        try:
+            ensure_nodes_catalog_loaded(storage.conn, catalogs_dir)
+        except Exception:
+            log.exception("serve: nodes_catalog initial load failed")
 
     registry = resolve_systems(client, cfg.world_address, cfg.abi_dir)
     prior = storage.load_system_address_snapshot()

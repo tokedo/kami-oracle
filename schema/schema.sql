@@ -347,3 +347,31 @@ CREATE TABLE IF NOT EXISTS skills_catalog (
 --   LEFT JOIN skills_catalog c ON c.skill_index = je."index"
 --   WHERE s.skills_json IS NOT NULL AND s.skills_json != '[]';
 -- ---------------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------------
+-- nodes_catalog (Session 14): static catalog mirrored from
+-- kami_context/catalogs/nodes.csv, augmented with room_index resolved
+-- at load time. Re-loaded only when kami_context is re-vendored (or
+-- on service startup if the table is empty), not on every poll. Used
+-- by the kami_current_location view to map an observed
+-- kami_action.node_id (set by harvest_* actions) to a room. The CSV
+-- itself doesn't carry a room column — Session 14 Part 1b discovery
+-- found that every node in nodes.csv has a same-Index, same-Name row
+-- in rooms.csv (zero mismatches across all 64 in-game nodes), so
+-- room_index = node_index for every in-game node. The loader stores
+-- this directly. If upstream ever introduces a node whose room
+-- differs, add a verifier in the loader against rooms.csv.
+-- Loader: ingester/nodes_catalog.py.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS nodes_catalog (
+    node_index   INTEGER PRIMARY KEY,
+    name         VARCHAR NOT NULL,
+    status       VARCHAR,            -- 'In Game' or other (catalog-only / removed)
+    drops        VARCHAR,
+    affinity     VARCHAR,            -- Eerie | Normal | Scrap | Insect (or comma-list)
+    level_limit  INTEGER,
+    yield_index  INTEGER,
+    scav_cost    INTEGER,
+    room_index   INTEGER,            -- resolved at load (Session 14: room_index = node_index)
+    loaded_ts    TIMESTAMP NOT NULL
+);
