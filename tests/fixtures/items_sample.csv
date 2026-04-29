@@ -1,0 +1,9 @@
+Index,Name,Type,Rarity,For,Flags,Effects,Requirements,Status,Description
+1,MUSU,Misc,Common,,,,,"In Game","Kamigotchi kurrency"
+2,VIPP,Consumable,Common,Account,,VIP1,VIP_ROOM,"In Game","Sacred paper which can be sacrificed for VIP status."
+20,Kamigotchi World Passport (Yellow),NFT,Rare,Passport_slot,,,,"In Game","Your ticket to great fortunes. In yellow."
+30001,Mask of Avarice,Equipment,Common,Kami_Pet_Slot,,E_POWER+3,,"In Game","The empty eyes of the old theatre mask."
+30011,Wise Leafling,Equipment,Uncommon,Kami_Pet_Slot,,E_BOUNTY+16%,,"In Game","The wise leafling hops contentedly."
+30031,Antique Automata,Equipment,Common,Kami_Pet_Slot,,E_HIB+15P,,"In Game","This antique automata may be partly broken."
+50001,Future Body Plate,Equipment,Common,Kami_Body_Slot,,E_HEALTH+5,,"In Game","Hypothetical future slot kind."
+99001,Lure,Tool,Common,,,,,"In Game","An empty For value, non-slot."

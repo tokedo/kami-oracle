@@ -50,6 +50,7 @@ from .config import configure_logging, load_config
 from .decoder import Decoder
 from .harvest_resolver import HarvestResolver
 from .ingest import process_block_range
+from .items_catalog import ensure_loaded as ensure_items_catalog_loaded
 from .kami_static import KamiStaticReader, refresh_stale
 from .poller import REGISTRY_REPROBE_INTERVAL_S
 from .storage import Storage, read_schema_sql
@@ -294,6 +295,16 @@ def main() -> int:
 
     storage = Storage(cfg.db_path)
     storage.bootstrap(read_schema_sql(REPO_ROOT))
+
+    # Session 13: hydrate items_catalog on first boot (idempotent — no-op
+    # once rows exist). The founder runs `python -m ingester.items_catalog
+    # --reload` after re-vendoring kami_context.
+    catalogs_dir = REPO_ROOT / "kami_context" / "catalogs"
+    with storage.lock:
+        try:
+            ensure_items_catalog_loaded(storage.conn, catalogs_dir)
+        except Exception:
+            log.exception("serve: items_catalog initial load failed")
 
     registry = resolve_systems(client, cfg.world_address, cfg.abi_dir)
     prior = storage.load_system_address_snapshot()

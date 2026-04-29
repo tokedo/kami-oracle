@@ -223,3 +223,27 @@ CREATE TABLE IF NOT EXISTS system_address_snapshot (
 );
 
 CREATE INDEX IF NOT EXISTS idx_system_snapshot_addr ON system_address_snapshot(address);
+
+-- ---------------------------------------------------------------------------
+-- items_catalog (Session 13): static catalog mirrored from
+-- kami_context/catalogs/items.csv. Re-loaded only when kami_context is
+-- re-vendored (or on service startup if the table is empty), not on
+-- every poll. Used by the kami_equipment view to resolve slot labels
+-- without a chain registry call (the chain doesn't return slot identity
+-- per equipped item; the catalog's "For" column is the source of
+-- truth). slot_type is non-NULL only when the catalog "For" cell
+-- matches a slot kind (today: Kami_Pet_Slot, Passport_slot; rule
+-- generalizes to any *_[Ss]lot value). slot_type NULL means the item
+-- isn't slot-equippable (consumables, currency, target-scoped items).
+-- Loader: ingester/items_catalog.py.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS items_catalog (
+    item_index   INTEGER  PRIMARY KEY,
+    name         VARCHAR  NOT NULL,
+    type         VARCHAR,
+    rarity       VARCHAR,
+    slot_type    VARCHAR,        -- chain "For" value when slot-equippable; NULL otherwise
+    effect       VARCHAR,        -- raw "Effects" cell (e.g. "E_POWER+3")
+    description  VARCHAR,
+    loaded_ts    TIMESTAMP NOT NULL
+);
