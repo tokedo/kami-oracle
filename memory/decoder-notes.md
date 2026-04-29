@@ -1489,3 +1489,89 @@ relax it. Snapshot lag means equipment can false-positive (an
 unequipped pet stays in the JSON until next sweep) — destructive
 ops should verify against live chain via Kamibots, not the oracle
 (`oracle.md` line 33-42: live truth is Kamibots' job).
+
+## Session 14 — skills_catalog + nodes_catalog + views
+
+### skills.csv shape
+
+`kami_context/catalogs/skills.csv` (72 data rows + 1 header at
+2026-04-29). Columns:
+
+  ., Index, Name, Tree, Tier, Tree req, Max, Cost, Effect, Value,
+  Units, Exclusion, Description.
+
+The leading `.` column is a blank cell (single-character header
+`﻿.` — UTF-8 BOM + dot). Loaders skip it.
+
+- 4 trees: Predator, Guardian, Harvester, Enlightened.
+- 16 effect keys, all in the documented set
+  (SHS/SPS/SVS/SYS/HFB/HIB/HBB/ATS/ATR/ASR/DTS/DTR/DSR/RMB/SB/CS).
+- 24 rows have `Exclusion` populated (mutually-exclusive sibling
+  lists like `"132, 133"` on skill 131 — pick at most one of three
+  per tier-3 / tier-6 choice point). Captured as raw VARCHAR;
+  enforcement lives in chain logic, oracle just stores.
+- Spot-check: skill 212 = Cardio (Enlightened tier 1, SHS, +10 Stat
+  per rank → "+10 HP/rank"); skill 222 = Meditative Breathing
+  (Enlightened tier 2, DTS, +0.02 Percent per rank → "+2% DTS/rank").
+  Note: agent's loadout note had these in the Enlightened tree, not
+  Guardian as the plan text loosely suggested.
+
+### nodes.csv shape
+
+`kami_context/catalogs/nodes.csv` (64 data rows + 1 header at
+2026-04-29). Columns:
+
+  Index, Name, Status, Drops, Affinity, Level Limit, YieldIndex,
+  Scav Cost.
+
+All 64 rows currently have `Status='In Game'` (no removed/test
+nodes in this snapshot). Indices are sparse: 1..90 with gaps —
+some node positions are reserved but not yet populated.
+
+### node → room mapping (discovery)
+
+The plan listed three candidate sources. Path (b) — kami_context
+lookup — landed clean: every node in `nodes.csv` has a same-Index,
+same-Name row in `kami_context/catalogs/rooms.csv`. Verified
+across all 64 in-game nodes: zero name mismatches, zero index
+mismatches. So `room_index = node_index` for every in-game node.
+
+`rooms.csv` itself has 70 rows — the extra 6 are rooms with no
+mineable node (passages, social rooms, etc.). We don't need
+rooms.csv to load nodes_catalog; the Index identity is sufficient.
+Vendored anyway so future room-only queries have a place to land.
+
+### move action — NOT bound to a kami today
+
+`move` actions in `kami_action` carry `kami_id = NULL`. The chain
+call is `system.account.move`, which is **account-level** — one
+move applies to all kamis under that account. The decoder stores
+`toIndex → node_id` (with the column repurposed to hold a
+*room index*, not a node index — see decoder.py:192-194).
+`from_addr` is the operator EOA, not the owner.
+
+To attribute a move to specific kamis, the oracle would need to
+fan out one row per kami of the moving account at the move's
+block — which requires snapshot-time account membership, not
+just current. That's a non-trivial decoder change and out of scope
+for Session 14.
+
+**Consequence for `kami_current_location`**: drop `move` from the
+source-action set; rely on `harvest_*` only. Volume-wise this is
+fine (~390k harvest actions vs ~10k moves; >97% of location-pinning
+volume is harvest). Functionally: a kami that just moved and
+hasn't started harvesting will have stale or NULL location. The
+`is_stale` flag (1800s threshold) and the explicit "verify before
+destructive ops" caveat are the trust boundary. Surfaced as a
+known gap in the verification report; revisit if the agent's
+real-world traffic shows it matters.
+
+### nodes_catalog vs kami_action.node_id semantics
+
+`harvest_*` actions store the **node index** in `node_id`
+(unambiguously a node). `move` actions store the **room index** in
+the same column (decoder.py:192). When the view joins
+`kami_action.node_id` against `nodes_catalog.node_index`, that
+join only makes semantic sense for `harvest_*` rows. By dropping
+`move` from the source set we sidestep the issue cleanly — the
+join is unambiguous.
