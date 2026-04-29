@@ -112,3 +112,134 @@ on this dataset (each body trait maps to exactly one affinity).
 ---
 
 Oracle is data-complete; future sessions reactive to real agent gaps.
+
+---
+
+## Hand-off to human (blocklife-ai) — Session 13 (2026-04-29)
+
+Two follow-ups for the founder. Same Session 12 pattern: oracle-side
+work is done and shipped on `main`; the doc edit lives in the
+kami-agent repo and the founder applies it there.
+
+### 5a. Updates to `kami-agent/integration/oracle.md`
+
+Three edits, all in the existing schema cheat-sheet section:
+
+**1. Refresh-cadence callout** — add at the *top* of the schema
+cheat sheet, before the table list:
+
+> **Snapshot cadence**: `kami_static` rows are refreshed by a daily
+> populator sweep. `build_refreshed_ts` is the per-row age. The
+> `kami_equipment` view exposes `freshness_seconds` and `is_stale`
+> (TRUE when > 36 hours old — one missed sweep). For destructive
+> ops (unequip, trade, liquidate) **always verify against live
+> chain state via Kamibots before committing** — a row can carry
+> an item that's been unequipped since the last sweep.
+
+**2. New `kami_equipment` view section** — add immediately after the
+existing `kami_static` section:
+
+> ### `kami_equipment` — slot-resolved equipped items
+>
+> A view (Session 13). One row per equipped item per kami, with
+> slot resolved via `items_catalog` (a static mirror of
+> `kami_context/catalogs/items.csv`). Replaces the previous
+> workaround of joining `equipment_json` against items.csv inline.
+>
+> Columns: `kami_id`, `kami_index`, `name`, `account_name`,
+> `slot_type` (`Kami_Pet_Slot`, `Passport_slot`, …),
+> `item_index`, `item_name`, `item_effect`,
+> `build_refreshed_ts`, `freshness_seconds`, `is_stale`.
+>
+> ```sql
+> -- All pet equips on a roster
+> SELECT kami_index, item_name, item_effect,
+>        freshness_seconds, is_stale
+> FROM kami_equipment
+> WHERE account_name = 'fey'
+>   AND slot_type = 'Kami_Pet_Slot';
+> ```
+>
+> **Always check `is_stale` before unequip / trade / liquidate.**
+> A false positive (item shown equipped, slot actually empty on
+> chain) is a normal consequence of snapshot lag, not a bug.
+> Verify with `get_kami_state(kami_index)` on Kamibots before
+> committing the destructive op.
+
+**3. Drop the "raw item indices, no slot labels" caveat** in the
+existing `equipment_json` description on `kami_static`. Replace it
+with: "Use the `kami_equipment` view for slot-resolved access. Raw
+`equipment_json` remains available for callers that want the
+original chain payload."
+
+### 5b. Session 14+ candidates (drafted/queued, do NOT pre-build)
+
+After founder reviewed kami-agent's full wish-list (2026-04-29), the
+queue is regularized as below. Each session's prompt should *lead*
+with the rejections it inherits, so the queue stays principled.
+
+- **Session 14 — `skills_catalog` + `kami_skills` view + `nodes_catalog`
+  + `kami_current_location` view.** Same catalog-mirror + view shape
+  as Session 13, applied to skills and to current location (latest-
+  known room derived from action stream). **Explicitly rejected
+  inside Session 14**: archetype columns, tier-choice columns,
+  summed `*_from_skills` columns, live-state derivations. Draft
+  prompt to be placed at
+  `context/kami-oracle-bootstrap/session-14-prompt.md` when the
+  founder is ready (not during this session).
+
+- **Session 15 — `account_static` identity table.** Account-level
+  identity (`account_id`, `account_index`, `account_name`,
+  `owner_address`, `kami_count`, `last_active_ts`). Identity only —
+  live-state rollups (`kamis_resting`/`kamis_harvesting`/
+  `kamis_dead` counts) **rejected** as Kamibots-domain.
+
+- **Session 16 — `kami_last_known_state` view (dead-kami hint).**
+  Derivation from action stream (latest `die` not followed by
+  `revive`). Caveated as a hint, not live truth.
+
+- **Session 17 — populator-side new-kami auto-populate.** Address
+  the original Pain 1b: `kami_static` rows for `kami_id`s that
+  appear in `kami_action` but are missing from `kami_static`, or
+  with `build_refreshed_ts` older than SLA. **Populator-side, not
+  endpoint-side.** Specifically rejected: any HTTP write endpoint
+  (breaks read-only `/sql` posture); any live-derivation view
+  (oracle is historical). The 1745 / 2465 kamis from kami-agent's
+  2026-04-29 pass are a real example — they appear in actions but
+  not in `kami_static` because the populator hasn't picked them up
+  yet.
+
+- **Session 18 (docs only) — `oracle.md` cookbook.** Short "common
+  queries" recipes near the top of `oracle.md`. Pure docs, no
+  oracle-side artifact. Founder may do this as a standalone PR
+  whenever convenient.
+
+- **Deferred / out (do not draft):** musu/hour rate (wait for 28d
+  window fill ~2026-05-24); predator-threat function (agent can
+  SQL when ready); cross-account inventory (too narrow);
+  strategy-membership view (off-chain, Kamibots-domain); operator
+  nonce-contention indicator (oracle ingests confirmed txs only,
+  wrong tool).
+
+### Rejections inherited from Session 13 (carry forward)
+
+These were proposed during the kami-agent feedback that triggered
+Session 13. They violate the oracle's "historical observation,
+read-only" role and were rejected with rationale in the Session 13
+prompt. Do not re-litigate without revisiting that rationale:
+
+1. **No `kami_pet_inferred` view** that derives live equipment from
+   stat-shift residuals. Live state is Kamibots' job
+   (`oracle.md` line 33-42); the skills catalog isn't in DuckDB; a
+   `/sql` query must never trigger a chain getter. Fix staleness by
+   freshening the snapshot, not synthesizing live state.
+2. **No HTTP refresh / write endpoint** for on-demand re-population
+   of `kami_static` rows. Breaks the read-only `/sql`-only posture
+   in `kami-oracle/CLAUDE.md`. Auto-populate from the action stream
+   in the populator (Session 17) is the right shape.
+3. **No `equipment_freshness_seconds` / `is_stale` columns on
+   `kami_static`.** Already derivable from `build_refreshed_ts`;
+   storing them creates two sources of truth that can drift.
+4. **No pet-specific column or view.** Pets are a slot kind, not
+   a special case. `kami_equipment WHERE slot_type = 'Kami_Pet_Slot'`
+   is the canonical access pattern.
