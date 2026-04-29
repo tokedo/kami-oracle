@@ -1,0 +1,68 @@
+Session 13 — items.csv discovery (2026-04-29)
+
+Source: kami_context/catalogs/items.csv
+File size: 30407 bytes
+Row count: 178 lines (1 header + 177 data rows)
+
+Header (10 columns):
+Index,Name,Type,Rarity,For,Flags,Effects,Requirements,Status,Description
+
+---
+
+Distinct (Type, For) combinations — all 19 in the wild:
+
+  count   Type             For
+     41   Material         (empty)
+     39   Food             Kami
+     36   Equipment        Kami_Pet_Slot
+     14   NFT              Passport_slot
+      8   Key Item         (empty)
+      6   Lootbox          Account
+      5   Potion           Kami
+      5   Potion           Enemy_Kami
+      5   Food             Account
+      4   Misc             (empty)
+      3   Tool             (empty)
+      2   Revive           Kami
+      2   Misc             Kami
+      2   Key Item         Account
+      1   Potion           Account
+      1   Misc             Account
+      1   ERC20            (empty)
+      1   Consumable       Kami
+      1   Consumable       Account
+
+Slot-bearing rows (slot_type ≠ NULL): 36 (Kami_Pet_Slot) + 14 (Passport_slot) = 50.
+Non-slot rows (slot_type = NULL): 127.
+
+Slot-resolution rule for the loader:
+  slot_type = For   when For matches *_[Ss]lot   (currently: Kami_Pet_Slot, Passport_slot)
+  slot_type = NULL  otherwise (Account, Kami, Enemy_Kami, empty)
+
+The rule is generic: any future *_slot value (Kami_Body_Slot, Kami_Hand_Slot, etc.) flows
+through automatically without code change.
+
+---
+
+Trigger items (kami-agent's stale-pet allocation pass, 2026-04-29):
+
+30011,Wise Leafling,Equipment,Uncommon,Kami_Pet_Slot,,E_BOUNTY+16%,,"In Game","The wise leafling hops contentedly and shares its skillful techniques to increase your kami's bounty."
+30031,Antique Automata,Equipment,Common,Kami_Pet_Slot,,E_HIB+15P,,"In Game","This antique automata may be partly broken, and yet still it drives your kami to harvest with ever greater intensity."
+
+Both resolve cleanly to slot_type=Kami_Pet_Slot. Effects: 30011 → E_BOUNTY+16%, 30031 → E_HIB+15P.
+
+---
+
+Representative non-pet sample:
+
+1,MUSU,Misc,Common,,,,,"In Game","Kamigotchi kurrency"
+  → slot_type NULL (currency, no scope at all)
+
+2,VIPP,Consumable,Common,Account,,VIP1,VIP_ROOM,"In Game","Sacred paper which can be sacrificed for VIP status."
+  → slot_type NULL (Account-scoped consumable)
+
+20,Kamigotchi World Passport (Yellow),NFT,Rare,Passport_slot,,,,"In Game","Your ticket to great fortunes. In yellow."
+  → slot_type Passport_slot (slotted)
+
+30001,Mask of Avarice,Equipment,Common,Kami_Pet_Slot,,E_POWER+3,,"In Game","The empty eyes of the old theatre mask stare back at you, its empty grimace seems to whisper of musu and power."
+  → slot_type Kami_Pet_Slot (slotted)

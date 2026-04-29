@@ -1433,3 +1433,59 @@ The integer `body` / `hand` columns (trait indices, ~30 distinct
 bodies / ~27 distinct hands) remain unchanged. The body/hand→affinity
 mapping is many-to-one and the columns coexist: integer for the
 specific trait pose, string for the affinity bucket.
+
+---
+
+## Session 13 — items_catalog + kami_equipment view (2026-04-29)
+
+Closes the slot-resolution gap noted in Session 10: `equipment_json`
+on `kami_static` carries raw item indices like `[30011]` but no slot
+label. The chain registry doesn't return slot identity per equipped
+item — Session 10 logged that as a "chain registry quirk." Catalog
+mirroring is the clean fix: items.csv carries `For` (slot identity)
+for every item, and re-vendoring `kami_context` is the existing
+trigger for catalog refresh, so no new poll-time work.
+
+### Source
+
+`kami_context/catalogs/items.csv` (177 data rows + 1 header at
+2026-04-29). Columns:
+
+  Index, Name, Type, Rarity, For, Flags, Effects, Requirements,
+  Status, Description.
+
+Loader: `ingester/items_catalog.py`. Trigger points:
+- Service startup, if `items_catalog` is empty.
+- Explicit `python -m ingester.items_catalog --reload` (the founder
+  runs this after re-vendoring `kami_context`).
+
+The loader is **not** in the per-poll path. Catalog data is static
+between vendor refreshes; re-loading every poll would burn IO for
+zero benefit.
+
+### slot_type → NULL convention
+
+`slot_type` in `items_catalog` carries the `For` cell when the item
+is slot-equippable, NULL otherwise. Rule: `slot_type = For` when
+`For` matches `*_[Ss]lot` (today: `Kami_Pet_Slot`, `Passport_slot`),
+NULL for `Account` / `Kami` / `Enemy_Kami` / empty (consumables,
+currency, target-scoped items). Rule is generic — any future slot
+kind (`Kami_Body_Slot`, `Kami_Hand_Slot`, etc.) flows through
+without code change.
+
+### kami_equipment view
+
+UNNESTs `kami_static.equipment_json` and joins `items_catalog` on
+`item_index` to expose slot-resolved equipment as one row per
+equipped item per kami. Replaces the prior workaround of joining
+`equipment_json` against items.csv inline on the agent side.
+
+### 36-hour stale threshold
+
+`is_stale = freshness_seconds > 129600`. The populator sweeps
+daily; 36h gives the agent one missed sweep of slack before flagging.
+If real cadence drifts, revisit the threshold rather than silently
+relax it. Snapshot lag means equipment can false-positive (an
+unequipped pet stays in the JSON until next sweep) — destructive
+ops should verify against live chain via Kamibots, not the oracle
+(`oracle.md` line 33-42: live truth is Kamibots' job).
