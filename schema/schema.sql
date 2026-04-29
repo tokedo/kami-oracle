@@ -377,55 +377,68 @@ CREATE TABLE IF NOT EXISTS nodes_catalog (
 );
 
 -- ---------------------------------------------------------------------------
--- kami_current_location (Session 14): per-kami latest-known room
--- derived from the most recent harvest_start action and resolved
--- through nodes_catalog. Among the harvest action family, only
--- harvest_start carries node_id — harvest_stop / collect /
--- liquidate decode only harvest_id (the chain call references the
--- harvest entity, not the node), so on those rows node_id is NULL.
--- The semantic is honest: "latest node this kami was sent to
--- harvest." Kamis remain on their last-harvested node until an
--- untracked move, so this is the correct current-location signal
--- in the absence of move attribution. Cold-start kamis (no
--- harvest_start in the 28d window) appear with NULL location
--- columns.
+-- kami_current_location (Session 14, corrected Session 14.5):
+-- per-kami current physical location IF the kami is currently on
+-- a node (i.e. mid-harvest). Resolved from kami_action's harvest-
+-- family events — kamis themselves don't move; they're placed on
+-- a node by their operator (harvest_start) and removed by their
+-- operator (harvest_stop / liquidated).
 --
--- move actions are NOT included. system.account.move is account-
--- level on chain — kami_action.move rows have kami_id NULL because
--- the chain call has no per-kami binding (the move applies to all
--- kamis under that account). Attributing to specific kamis
--- requires snapshot-time account-membership resolution and is a
--- future decoder concern.
+-- currently_harvesting: TRUE iff the kami's latest harvest-active
+-- signal {harvest_start, harvest_collect} is more recent than its
+-- latest end-of-harvest signal {harvest_stop, harvest_liquidate
+-- where it was the victim}. harvest_collect does NOT end harvesting
+-- (mid-session payout claim only — verified S14.5 Part 1 against
+-- chain getKami(...).state).
 --
--- is_stale threshold is 1800s (30 min). Kamis park on nodes for
--- hours; 30 min of fresh trust suffices for read-only ops; longer
--- means the agent should verify the kami's actual room against
--- chain via Kamibots before any destructive op keyed on location.
--- NOT live truth: an account-level move can shift a kami to a new
--- room without us attributing it to this specific kami.
+-- harvest_liquidate's kami_id is the *killer* (decoder.py:165-168
+-- maps killerID→kami_id, victimHarvID→harvest_id). The view
+-- resolves the victim via a self-join on harvest_id back to the
+-- victim's harvest_start (harvest_id = keccak("harvest"||kami_id_be),
+-- bijective). The killer's own liquidate row is NOT an end-of-
+-- harvest signal for the killer.
+--
+-- current_node_id / current_room_index: populated only when
+-- currently_harvesting = TRUE AND a harvest_start exists in the
+-- rolling window. NULL otherwise — either the kami is in its
+-- operator's pocket (resting kami), or the kami has been harvesting
+-- continuously for longer than the window so the start is gone
+-- (window-edge: agent should verify against chain via Kamibots).
+-- Resting-kami physical location is the *operator's* current room,
+-- derivable by joining kami_static.account_id against the operator's
+-- latest move action; that join is deliberately not done in this
+-- view (kept focused; agent composes when needed).
+--
+-- last_harvest_node_id / last_harvest_start_ts: the node from the
+-- latest harvest_start regardless of whether the kami is still on
+-- it. Useful for "where was this kami last seen on a node" queries
+-- and for distinguishing "never harvested in window"
+-- (last_harvest_node_id IS NULL) from "previously harvested,
+-- currently resting" (last_harvest_node_id populated,
+-- currently_harvesting = FALSE).
+--
+-- since_ts: timestamp of the action defining current state. If
+-- currently_harvesting, equals the latest start-or-collect ts.
+-- Otherwise equals the latest stop-or-liquidate-victim ts.
+--
+-- is_stale: only meaningful when currently_harvesting. TRUE when
+-- the latest active signal is older than 30 min; worth verifying
+-- for destructive ops keyed on location. NULL when the kami isn't
+-- harvesting (no signal to be stale about).
+--
+-- die / revive are NOT in our action_type enum (no chain-side
+-- decoder for those system calls). A kami that died from non-
+-- liquidate causes won't have its harvest closed in our records
+-- — known false-positive for currently_harvesting; out of scope
+-- for S14.5.
+--
+-- account-level move actions are NOT a "missed kami movement"
+-- gap. Kamis don't move on chain. The operator's move shifts the
+-- operator's room and any *resting* kamis follow implicitly;
+-- harvesting kamis stay on their node. The Session 14 framing
+-- ("untracked move could shift a kami") was conceptually wrong
+-- and is corrected here.
 --
 -- View definition lives in
--- migrations/012_add_kami_current_location_view.py; canonical shape:
---   WITH last_loc_action AS (
---     SELECT a.kami_id, a.action_type, a.node_id, a.metadata_json,
---            a.block_timestamp,
---            ROW_NUMBER() OVER (PARTITION BY a.kami_id
---                               ORDER BY a.block_timestamp DESC) AS rn
---     FROM kami_action a
---     WHERE a.kami_id IS NOT NULL
---       AND a.action_type = 'harvest_start'
---       AND a.node_id IS NOT NULL
---   )
---   SELECT s.kami_id, s.kami_index, s.name, s.account_name,
---          n.room_index AS current_room_index,
---          CAST(la.node_id AS INTEGER) AS current_node_id,
---          la.action_type AS source_action_type,
---          la.block_timestamp AS since_ts,
---          CAST(EXTRACT(EPOCH FROM (now() - la.block_timestamp)) AS INTEGER)
---              AS freshness_seconds,
---          EXTRACT(EPOCH FROM (now() - la.block_timestamp)) > 1800
---              AS is_stale
---   FROM kami_static s
---   LEFT JOIN last_loc_action la ON la.kami_id = s.kami_id AND la.rn = 1
---   LEFT JOIN nodes_catalog n ON n.node_index = CAST(la.node_id AS INTEGER);
+-- migrations/013_correct_kami_current_location_view.py.
 -- ---------------------------------------------------------------------------
