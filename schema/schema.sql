@@ -375,3 +375,57 @@ CREATE TABLE IF NOT EXISTS nodes_catalog (
     room_index   INTEGER,            -- resolved at load (Session 14: room_index = node_index)
     loaded_ts    TIMESTAMP NOT NULL
 );
+
+-- ---------------------------------------------------------------------------
+-- kami_current_location (Session 14): per-kami latest-known room
+-- derived from the most recent harvest_start action and resolved
+-- through nodes_catalog. Among the harvest action family, only
+-- harvest_start carries node_id — harvest_stop / collect /
+-- liquidate decode only harvest_id (the chain call references the
+-- harvest entity, not the node), so on those rows node_id is NULL.
+-- The semantic is honest: "latest node this kami was sent to
+-- harvest." Kamis remain on their last-harvested node until an
+-- untracked move, so this is the correct current-location signal
+-- in the absence of move attribution. Cold-start kamis (no
+-- harvest_start in the 28d window) appear with NULL location
+-- columns.
+--
+-- move actions are NOT included. system.account.move is account-
+-- level on chain — kami_action.move rows have kami_id NULL because
+-- the chain call has no per-kami binding (the move applies to all
+-- kamis under that account). Attributing to specific kamis
+-- requires snapshot-time account-membership resolution and is a
+-- future decoder concern.
+--
+-- is_stale threshold is 1800s (30 min). Kamis park on nodes for
+-- hours; 30 min of fresh trust suffices for read-only ops; longer
+-- means the agent should verify the kami's actual room against
+-- chain via Kamibots before any destructive op keyed on location.
+-- NOT live truth: an account-level move can shift a kami to a new
+-- room without us attributing it to this specific kami.
+--
+-- View definition lives in
+-- migrations/012_add_kami_current_location_view.py; canonical shape:
+--   WITH last_loc_action AS (
+--     SELECT a.kami_id, a.action_type, a.node_id, a.metadata_json,
+--            a.block_timestamp,
+--            ROW_NUMBER() OVER (PARTITION BY a.kami_id
+--                               ORDER BY a.block_timestamp DESC) AS rn
+--     FROM kami_action a
+--     WHERE a.kami_id IS NOT NULL
+--       AND a.action_type = 'harvest_start'
+--       AND a.node_id IS NOT NULL
+--   )
+--   SELECT s.kami_id, s.kami_index, s.name, s.account_name,
+--          n.room_index AS current_room_index,
+--          CAST(la.node_id AS INTEGER) AS current_node_id,
+--          la.action_type AS source_action_type,
+--          la.block_timestamp AS since_ts,
+--          CAST(EXTRACT(EPOCH FROM (now() - la.block_timestamp)) AS INTEGER)
+--              AS freshness_seconds,
+--          EXTRACT(EPOCH FROM (now() - la.block_timestamp)) > 1800
+--              AS is_stale
+--   FROM kami_static s
+--   LEFT JOIN last_loc_action la ON la.kami_id = s.kami_id AND la.rn = 1
+--   LEFT JOIN nodes_catalog n ON n.node_index = CAST(la.node_id AS INTEGER);
+-- ---------------------------------------------------------------------------
