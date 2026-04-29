@@ -381,3 +381,117 @@ a snapshot-time account-membership resolution in the decoder
 block) — meaningful refactor, not Session 14 scope. Re-evaluate
 if the agent's real-world traffic shows it matters; the
 verify-before-act discipline covers it for now.
+
+**Session 14.5 reframing (2026-04-29):** the move-attribution "gap"
+above was framed wrong. Kamis don't move on chain — operators do.
+A `system.account.move` is the operator's room change, not a
+missed kami movement. Harvesting kamis stay on their node;
+resting kamis follow the operator implicitly (their physical room
+is the operator's room). The remaining work is not "attribute the
+move to specific kamis" — it's "expose the operator's current
+room" so an agent can answer "where is my resting kami?" by
+joining `kami_static.account_id` to operator-location. See
+`Session 15.5 candidate (account_current_location)` in 7c above
+for the proposed shape.
+
+## Hand-off to human (blocklife-ai) — Session 14.5 (2026-04-29)
+
+Session 14.5 corrected `kami_current_location`'s semantic to
+match the actual Kamigotchi mechanic (kamis don't move; operators
+do; a kami is on a node iff currently harvesting). Schema is now
+version 13. The view's column set changed in three places that
+need to be reflected in `kami-agent/integration/oracle.md` and
+`kami-zero/integration/oracle.md`. Same hand-off pattern as
+S12 / S13 / S14.
+
+### Diff — `oracle.md` `kami_current_location` section
+
+Replace the existing description with:
+
+> **`kami_current_location`** (view, Session 14.5). Per-kami
+> current physical location IF the kami is currently on a node
+> (mid-harvest). **Kamis don't move on chain — operators do.** A
+> kami is on a node iff currently harvesting; a resting kami is
+> in its operator's pocket (logically at the operator's current
+> room, not on any node).
+>
+> Columns: `kami_id`, `kami_index`, `name`, `account_name`,
+> `currently_harvesting` (BOOLEAN — TRUE iff latest harvest-
+> active signal {harvest_start, harvest_collect} more recent than
+> latest end-of-harvest signal {harvest_stop, harvest_liquidate
+> where this kami was the victim}), `current_node_id` /
+> `current_room_index` (NULL when not currently harvesting),
+> `last_harvest_node_id` / `last_harvest_start_ts` (where the
+> kami was last seen on a node, regardless of current state),
+> `since_ts`, `freshness_seconds`, `is_stale` (NULL when not
+> currently_harvesting; TRUE at >30 min for an active signal —
+> verify against chain via Kamibots before destructive ops).
+>
+> harvest_collect does NOT end harvesting (mid-session payout
+> only — chain spot-check confirmed). harvest_liquidate's
+> `kami_id` is the *killer*, not the victim — the view resolves
+> the victim via a self-join on `harvest_id` back to the victim's
+> `harvest_start` (harvest_id is bijective with kami_id by
+> keccak derivation).
+>
+> die / revive aren't in our `action_type` enum (no decoder for
+> the chain calls that emit those state transitions) — known
+> false-positive: a kami that died from non-liquidate causes
+> won't have its harvest closed in our records. Workaround:
+> `is_stale = TRUE` for >30 min flags the row for chain
+> verification; agent should not trust currently_harvesting
+> alone for destructive ops.
+>
+> Window-edge: a kami harvesting continuously for >7 days has no
+> `harvest_start` in our window. The view treats `harvest_collect`
+> as evidence of active harvesting in this case — so
+> currently_harvesting reads TRUE — but `current_node_id` is
+> NULL because the start row is gone. Treat
+> (currently_harvesting=TRUE AND current_node_id IS NULL) as
+> "harvesting on an unknown node — verify against Kamibots."
+
+### Reframe the move-attribution caveat
+
+The S14 oracle.md likely describes account-level `move` as a
+"missed kami-movement signal." That framing is wrong. The
+account-level `move` is the operator's movement; for resting
+kamis the physical location is the operator's current room, not
+the last harvest node. To answer "where is this resting kami?",
+an agent joins `kami_static.account_id` to the operator's latest
+`move` action (a small extra step that lives in agent code; see
+also the Session 15.5 candidate `account_current_location` view
+which would bundle this if it becomes hot).
+
+### Update example SQL
+
+The S14 `oracle.md` "kamis on node 86" snippet should change
+from `WHERE current_node_id = 86` to:
+
+```sql
+SELECT kami_index, name, since_ts, freshness_seconds
+FROM kami_current_location
+WHERE currently_harvesting AND current_node_id = 86
+  AND NOT is_stale;
+```
+
+### Agent-side code
+
+Most kami-agent / kami-zero code reads `oracle.md` fresh each
+session, so the change propagates on next runs. Spot-check that
+no agent code keys destructive ops on `current_room_index IS NOT
+NULL` without the `currently_harvesting` guard — under S14 that
+column was populated for ~6.9k kamis; under S14.5 it's ~4.6k
+(kamis truly mid-harvest), so a destructive query keyed on the
+old shape would silently change scope.
+
+### Session 15.5 candidate — `account_current_location` view
+
+Add to the queued list under 7c:
+
+> **`account_current_location`** view: per-account current room
+> derived from the operator's latest `move` action (account-
+> level). Pairs with `kami_current_location` so the agent can
+> answer "where is this resting kami?" by joining `account_id`
+> and reading the operator's room. Defer until an agent actually
+> needs it (kami-agent traffic shows it matters); today the
+> agent can join itself in the rare resting-kami-location case.
