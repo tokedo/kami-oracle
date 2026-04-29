@@ -140,6 +140,42 @@ when grouping or joining by elemental type; use the integer columns
 for trait-pose specificity. See `memory/decoder-notes.md` "Session 12
 — affinities" for ordering verification and the chain dump.
 
+## Slot-resolved equipment: `items_catalog` + `kami_equipment` (Session 13)
+
+`equipment_json` on `kami_static` is a JSON array of raw `item_index`
+values (e.g. `[30011]`) — chain-faithful but slot-anonymous.
+`items_catalog` mirrors `kami_context/catalogs/items.csv` into DuckDB
+so the `kami_equipment` view can resolve every equipped item to its
+slot kind, name, and effect without a per-row chain getter.
+
+- **`items_catalog`** — table. One row per item in `items.csv`. Columns:
+  `item_index` (PK), `name`, `type`, `rarity`, `slot_type`, `effect`,
+  `description`, `loaded_ts`. `slot_type` is non-NULL only when the
+  catalog "For" cell matches `*_[Ss]lot` (today: `Kami_Pet_Slot`,
+  `Passport_slot`); other "For" values (Account / Kami / Enemy_Kami /
+  empty) collapse to NULL. Reload: `python -m ingester.items_catalog
+  --reload` after re-vendoring `kami_context`.
+- **`kami_equipment`** — view. One row per equipped item per kami.
+  Joins `kami_static.equipment_json` against `items_catalog` to
+  resolve `slot_type` / `item_name` / `item_effect`. Includes
+  `freshness_seconds` and `is_stale` derived from `build_refreshed_ts`
+  (threshold 36h — populator sweeps daily, so 36h gives one missed-
+  sweep slack). `is_stale = TRUE` means **verify with live chain
+  state via Kamibots before destructive ops** (unequip, transfer,
+  liquidate). Snapshot lag means equipment can false-positive — an
+  unequipped pet stays in the JSON until the next sweep.
+
+```sql
+-- All pet equips on a roster, ergonomic + freshness-aware.
+SELECT kami_index, item_name, item_effect, freshness_seconds, is_stale
+FROM kami_equipment
+WHERE account_name = 'fey'
+  AND slot_type = 'Kami_Pet_Slot';
+```
+
+See `memory/decoder-notes.md` "Session 13 — items_catalog +
+kami_equipment view" for the slot-resolution rule and rationale.
+
 ## MUSU semantics (read once)
 
 `kami_action.amount` is **gross MUSU pre-tax** — the integer

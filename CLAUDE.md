@@ -103,6 +103,23 @@ Canonical definitions live in `schema/schema.sql`. Summary:
   elemental bucket and is many-to-one over body/hand traits.
   - `body_affinity` — VARCHAR, e.g. `"NORMAL"`
   - `hand_affinity` — VARCHAR, e.g. `"EERIE"`
+- **`items_catalog`** (Session 13): static mirror of
+  `kami_context/catalogs/items.csv`. `item_index` (PK), `name`,
+  `type`, `rarity`, `slot_type` (non-NULL only when the "For" cell
+  matches `*_[Ss]lot`; today `Kami_Pet_Slot` or `Passport_slot`),
+  `effect`, `description`, `loaded_ts`. Re-loaded only when
+  `kami_context` is re-vendored — `python -m ingester.items_catalog
+  --reload` is the founder's command. Loader is **not** in the
+  per-poll path.
+- **`kami_equipment`** (Session 13, view): one row per equipped item
+  per kami. Joins `kami_static.equipment_json` (UNNEST'd) against
+  `items_catalog` on `item_index`. Columns: `kami_id`, `kami_index`,
+  `name`, `account_name`, `slot_type`, `item_index`, `item_name`,
+  `item_effect`, `build_refreshed_ts`, `freshness_seconds`,
+  `is_stale`. Freshness derived from `build_refreshed_ts`; threshold
+  is 36h (129600s). `is_stale = TRUE` ⇒ verify against live chain
+  via Kamibots before any destructive op (snapshot lag means
+  equipment can false-positive).
 - **`ingest_cursor`**: ops state. Last committed block, vendor
   version, schema version.
 
