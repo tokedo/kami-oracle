@@ -21,11 +21,13 @@ cp "$SRC/integration/system-ids.md" "$DST/system-ids.md"
 cp "$SRC/integration/chain.md"      "$DST/chain.md"
 
 # Catalogs (Session 11+): skill effects + equipment effects derived
-# from these CSVs to populate kami_static modifier columns.
+# from these CSVs to populate kami_static modifier columns. Session 14
+# adds nodes / rooms catalogs for kami_current_location. Pull the
+# whole catalogs/ tree so future additions upstream flow through
+# without per-file edits here. Loaders consume only what they need.
 mkdir -p "$DST/catalogs"
 rm -rf "$DST/catalogs"/*
-cp "$SRC/catalogs/skills.csv" "$DST/catalogs/skills.csv"
-cp "$SRC/catalogs/items.csv"  "$DST/catalogs/items.csv"
+cp -R "$SRC/catalogs/"* "$DST/catalogs/"
 
 # Record upstream version for reproducibility.
 if git -C "$SRC" rev-parse --short HEAD >/dev/null 2>&1; then
