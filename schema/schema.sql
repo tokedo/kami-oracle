@@ -247,3 +247,34 @@ CREATE TABLE IF NOT EXISTS items_catalog (
     description  VARCHAR,
     loaded_ts    TIMESTAMP NOT NULL
 );
+
+-- ---------------------------------------------------------------------------
+-- kami_equipment (Session 13): one row per equipped item per kami.
+-- equipment_json is UNNEST'd (DuckDB casts the VARCHAR JSON array
+-- directly to INTEGER[]) and LEFT JOIN'd against items_catalog to
+-- resolve slot_type, item_name, item_effect. freshness_seconds and
+-- is_stale are derived from kami_static.build_refreshed_ts (snapshot
+-- age, not on-chain truth) — not columns on kami_static. Threshold is
+-- 36h (129600s); the populator sweeps daily, so 36h gives the agent
+-- one missed-sweep slack before the row is flagged. is_stale = TRUE
+-- means the agent should verify with live chain state via Kamibots
+-- before destructive ops (unequip, transfer, liquidate). Snapshot lag
+-- means equipment can false-positive: an unequipped pet stays in the
+-- JSON until next sweep. Live-truth verification is on Kamibots, not
+-- the oracle — see kami-agent/integration/oracle.md.
+--
+-- View definition lives in migrations/008_add_kami_equipment_view.py;
+-- canonical shape:
+--   SELECT s.kami_id, s.kami_index, s.name, s.account_name,
+--          i.slot_type, je.value AS item_index,
+--          i.name AS item_name, i.effect AS item_effect,
+--          s.build_refreshed_ts,
+--          CAST(EXTRACT(EPOCH FROM (now() - s.build_refreshed_ts)) AS INTEGER)
+--              AS freshness_seconds,
+--          EXTRACT(EPOCH FROM (now() - s.build_refreshed_ts)) > 129600
+--              AS is_stale
+--   FROM kami_static s,
+--        UNNEST(CAST(s.equipment_json AS INTEGER[])) AS je(value)
+--   LEFT JOIN items_catalog i ON i.item_index = je.value
+--   WHERE s.equipment_json IS NOT NULL AND s.equipment_json != '[]';
+-- ---------------------------------------------------------------------------
