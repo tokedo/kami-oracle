@@ -310,3 +310,40 @@ CREATE TABLE IF NOT EXISTS skills_catalog (
     description  VARCHAR,
     loaded_ts    TIMESTAMP NOT NULL
 );
+
+-- ---------------------------------------------------------------------------
+-- kami_skills (Session 14): one row per (kami, invested skill) per
+-- skills_json entry. skills_json is UNNEST'd (DuckDB casts the
+-- VARCHAR JSON array directly to STRUCT("index" INTEGER, "points"
+-- INTEGER)[]) and LEFT JOIN'd against skills_catalog to resolve
+-- skill_name, tree, tier, effect, value, units. freshness_seconds
+-- and is_stale derive from kami_static.build_refreshed_ts (snapshot
+-- age, not on-chain truth) — not columns on kami_static. Threshold
+-- is 36h (129600s); same as kami_equipment, populator sweeps daily.
+-- Builds change rarely so the stale flag here is mostly defensive,
+-- but the same verify-before-act discipline applies.
+--
+-- Per-tree point sums and archetype labels are intentionally NOT
+-- stored: derive per-tree totals via
+--   SELECT tree, SUM(points) FROM kami_skills WHERE kami_id = X GROUP BY tree;
+-- archetype classification stays in agent code where the heuristic
+-- is visible. Oracle exposes the components, not the label.
+--
+-- View definition lives in migrations/010_add_kami_skills_view.py;
+-- canonical shape:
+--   SELECT s.kami_id, s.kami_index, s.name, s.account_name,
+--          je."index"  AS skill_index,
+--          c.name      AS skill_name,
+--          c.tree, c.tier,
+--          je."points" AS points,
+--          c.effect, c.value, c.units,
+--          s.build_refreshed_ts,
+--          CAST(EXTRACT(EPOCH FROM (now() - s.build_refreshed_ts)) AS INTEGER)
+--              AS freshness_seconds,
+--          EXTRACT(EPOCH FROM (now() - s.build_refreshed_ts)) > 129600
+--              AS is_stale
+--   FROM kami_static s,
+--        UNNEST(CAST(s.skills_json AS STRUCT("index" INTEGER, "points" INTEGER)[])) AS t(je)
+--   LEFT JOIN skills_catalog c ON c.skill_index = je."index"
+--   WHERE s.skills_json IS NOT NULL AND s.skills_json != '[]';
+-- ---------------------------------------------------------------------------

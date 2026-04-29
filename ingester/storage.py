@@ -19,7 +19,7 @@ from .decoder import DecodedAction
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 @dataclass
@@ -101,6 +101,7 @@ class Storage:
         m007 = _load("migrations/007_add_items_catalog.py", "migration_007")
         m008 = _load("migrations/008_add_kami_equipment_view.py", "migration_008")
         m009 = _load("migrations/009_add_skills_catalog.py", "migration_009")
+        m010 = _load("migrations/010_add_kami_skills_view.py", "migration_010")
 
         # Each migration is idempotent — safe to run on a fresh install where
         # the columns may already exist via schema.sql.
@@ -143,6 +144,11 @@ class Storage:
             log.info("storage: applying migration 009 (add skills_catalog table)")
             stats = m009.run(self.conn)
             log.info("storage: migration 009 complete: %s", stats)
+
+        if version < m010.TARGET_SCHEMA_VERSION:
+            log.info("storage: applying migration 010 (add kami_skills view)")
+            stats = m010.run(self.conn)
+            log.info("storage: migration 010 complete: %s", stats)
 
     # ------------------------------------------------------------------
     # Cursor.
